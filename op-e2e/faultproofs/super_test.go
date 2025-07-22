@@ -238,9 +238,6 @@ func TestSuperCannonStepWithPreimage_nonExistingPreimage(t *testing.T) {
 	}
 
 	RunTestsAcrossVmTypes(t, preimageConditions, func(t *testing.T, allocType config.AllocType, preimageType string) {
-		if preimageType == "blob" || preimageType == "sha256" {
-			t.Skip("TODO(#15311): Add blob preimage test case. sha256 is also used for blobs")
-		}
 		testSuperPreimageStep(t, utils.FirstPreimageLoadOfType(preimageType), false, allocType)
 	}, WithNextVMOnly[string](), WithTestName(testName))
 }
@@ -254,7 +251,7 @@ func TestSuperCannonStepWithPreimage_existingPreimage(t *testing.T) {
 
 func testSuperPreimageStep(t *testing.T, preimageType utils.PreimageOpt, preloadPreimage bool, allocType config.AllocType) {
 	ctx := context.Background()
-	sys, disputeGameFactory, _ := StartInteropFaultDisputeSystem(t, WithAllocType(allocType))
+	sys, disputeGameFactory, _ := StartInteropFaultDisputeSystem(t, WithBlobBatches(), WithAllocType(allocType))
 
 	status, err := sys.SupervisorClient().SyncStatus(ctx)
 	require.NoError(t, err)
