@@ -4,6 +4,8 @@ pragma solidity 0.8.15;
 // Testing
 import { console2 as console } from "forge-std/console2.sol";
 import { Vm, VmSafe } from "forge-std/Vm.sol";
+import { EIP1967Helper } from "test/mocks/EIP1967Helper.sol";
+import { FeatureFlags } from "test/setup/FeatureFlags.sol";
 
 // Scripts
 import { Deploy } from "scripts/deploy/Deploy.s.sol";
@@ -60,13 +62,16 @@ import { ISuperchainTokenBridge } from "interfaces/L2/ISuperchainTokenBridge.sol
 import { IPermissionedDisputeGame } from "interfaces/dispute/IPermissionedDisputeGame.sol";
 import { IFaultDisputeGame } from "interfaces/dispute/IFaultDisputeGame.sol";
 import { ICrossL2Inbox } from "interfaces/L2/ICrossL2Inbox.sol";
+import { IFeeSplitter } from "interfaces/L2/IFeeSplitter.sol";
+import { IL1Withdrawer } from "interfaces/L2/IL1Withdrawer.sol";
+import { ISuperchainRevSharesCalculator } from "interfaces/L2/ISuperchainRevSharesCalculator.sol";
 
 /// @title Setup
 /// @dev This contact is responsible for setting up the contracts in state. It currently
 ///      sets the L2 contracts directly at the predeploy addresses instead of setting them
 ///      up behind proxies. In the future we will migrate to importing the genesis JSON
 ///      file that is created to set up the L2 contracts instead of setting them up manually.
-contract Setup {
+abstract contract Setup is FeatureFlags {
     using ForkUtils for Fork;
 
     /// @notice The address of the foundry Vm contract.
@@ -103,6 +108,8 @@ contract Setup {
     // L1 contracts - core
     address proxyAdminOwner;
     IProxyAdmin proxyAdmin;
+    address superchainProxyAdminOwner;
+    IProxyAdmin superchainProxyAdmin;
     IOptimismPortal optimismPortal2;
     IETHLockbox ethLockbox;
     ISystemConfig systemConfig;
@@ -142,6 +149,9 @@ contract Setup {
     ISuperchainTokenBridge superchainTokenBridge = ISuperchainTokenBridge(Predeploys.SUPERCHAIN_TOKEN_BRIDGE);
     IOptimismSuperchainERC20Factory l2OptimismSuperchainERC20Factory =
         IOptimismSuperchainERC20Factory(Predeploys.OPTIMISM_SUPERCHAIN_ERC20_FACTORY);
+    IFeeSplitter feeSplitter = IFeeSplitter(payable(Predeploys.FEE_SPLITTER));
+    IL1Withdrawer l1Withdrawer;
+    ISuperchainRevSharesCalculator superchainRevSharesCalculator;
 
     /// @notice Indicates whether a test is running against a forked production network.
     function isForkTest() public view returns (bool) {
@@ -179,6 +189,10 @@ contract Setup {
 
         deploy.setUp();
         forkLive.setUp();
+
+        resolveFeaturesFromEnv();
+        deploy.cfg().setDevFeatureBitmap(devFeatureBitmap);
+
         console.log("Setup: L1 setup done!");
 
         if (isForkTest()) {
@@ -205,14 +219,6 @@ contract Setup {
         if (isForkTest()) {
             vm.skip(true);
             console.log(string.concat("Skipping fork test: ", message));
-        }
-    }
-
-    /// @dev Skips tests when running against a forked production network that is not OP.
-    function skipIfNotOpFork(string memory message) public {
-        if (isForkTest() && !isOpFork()) {
-            vm.skip(true);
-            console.log(string.concat("Skipping non-OP fork test: ", message));
         }
     }
 
@@ -257,7 +263,10 @@ contract Setup {
         // Only skip ETHLockbox assignment if we're in a fork test with non-upgraded fork
         // TODO(#14691): Remove this check once Upgrade 15 is deployed on Mainnet.
         if (!isForkTest() || deploy.cfg().useUpgradedFork()) {
-            ethLockbox = IETHLockbox(artifacts.mustGetAddress("ETHLockboxProxy"));
+            // Here we use getAddress instead of mustGetAddress because some chains might not have
+            // the ETHLockbox proxy. Chains that don't have the ETHLockbox proxy will just return
+            // address(0) and cause a revert if we use mustGetAddress.
+            ethLockbox = IETHLockbox(artifacts.getAddress("ETHLockboxProxy"));
         }
 
         systemConfig = ISystemConfig(artifacts.mustGetAddress("SystemConfigProxy"));
@@ -278,6 +287,8 @@ contract Setup {
         opcm = IOPContractsManager(artifacts.mustGetAddress("OPContractsManager"));
         proxyAdmin = IProxyAdmin(artifacts.mustGetAddress("ProxyAdmin"));
         proxyAdminOwner = proxyAdmin.owner();
+        superchainProxyAdmin = IProxyAdmin(EIP1967Helper.getAdmin(address(superchainConfig)));
+        superchainProxyAdminOwner = superchainProxyAdmin.owner();
         mips = IBigStepper(artifacts.mustGetAddress("MipsSingleton"));
 
         if (deploy.cfg().useAltDA()) {
@@ -286,6 +297,9 @@ contract Setup {
         }
 
         console.log("Setup: registered L1 deployments");
+
+        // Update the SystemConfig address.
+        setSystemConfig(systemConfig);
     }
 
     /// @dev Sets up the L2 contracts. Depends on `L1()` being called first.
@@ -314,13 +328,26 @@ contract Setup {
                 l1FeeVaultRecipient: deploy.cfg().l1FeeVaultRecipient(),
                 l1FeeVaultMinimumWithdrawalAmount: deploy.cfg().l1FeeVaultMinimumWithdrawalAmount(),
                 l1FeeVaultWithdrawalNetwork: deploy.cfg().l1FeeVaultWithdrawalNetwork(),
+                operatorFeeVaultRecipient: deploy.cfg().operatorFeeVaultRecipient(),
+                operatorFeeVaultMinimumWithdrawalAmount: deploy.cfg().operatorFeeVaultMinimumWithdrawalAmount(),
+                operatorFeeVaultWithdrawalNetwork: deploy.cfg().operatorFeeVaultWithdrawalNetwork(),
                 governanceTokenOwner: deploy.cfg().governanceTokenOwner(),
                 fork: uint256(l2Fork),
                 deployCrossL2Inbox: deploy.cfg().useInterop(),
                 enableGovernance: deploy.cfg().enableGovernance(),
-                fundDevAccounts: deploy.cfg().fundDevAccounts()
+                fundDevAccounts: deploy.cfg().fundDevAccounts(),
+                useRevenueShare: deploy.cfg().useRevenueShare(),
+                chainFeesRecipient: deploy.cfg().chainFeesRecipient(),
+                l1FeesDepositor: deploy.cfg().l1FeesDepositor()
             })
         );
+
+        if (deploy.cfg().useRevenueShare()) {
+            superchainRevSharesCalculator = ISuperchainRevSharesCalculator(
+                address(IFeeSplitter(payable(Predeploys.FEE_SPLITTER)).sharesCalculator())
+            );
+            l1Withdrawer = IL1Withdrawer(superchainRevSharesCalculator.shareRecipient());
+        }
 
         // Set the governance token's owner to be the final system owner
         address finalSystemOwner = deploy.cfg().finalSystemOwner();
@@ -350,6 +377,7 @@ contract Setup {
         labelPredeploy(Predeploys.OPTIMISM_SUPERCHAIN_ERC20_FACTORY);
         labelPredeploy(Predeploys.OPTIMISM_SUPERCHAIN_ERC20_BEACON);
         labelPredeploy(Predeploys.SUPERCHAIN_TOKEN_BRIDGE);
+        labelPredeploy(Predeploys.FEE_SPLITTER);
 
         // L2 Preinstalls
         labelPreinstall(Preinstalls.MultiCall3);

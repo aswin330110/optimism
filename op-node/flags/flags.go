@@ -9,11 +9,13 @@ import (
 	altda "github.com/ethereum-optimism/optimism/op-alt-da"
 	"github.com/ethereum-optimism/optimism/op-node/rollup/engine"
 	"github.com/ethereum-optimism/optimism/op-node/rollup/sync"
+	"github.com/ethereum-optimism/optimism/op-service/cliiface"
 	openum "github.com/ethereum-optimism/optimism/op-service/enum"
 	opflags "github.com/ethereum-optimism/optimism/op-service/flags"
 	oplog "github.com/ethereum-optimism/optimism/op-service/log"
 	opmetrics "github.com/ethereum-optimism/optimism/op-service/metrics"
 	"github.com/ethereum-optimism/optimism/op-service/oppprof"
+	"github.com/ethereum-optimism/optimism/op-service/ptr"
 	oprpc "github.com/ethereum-optimism/optimism/op-service/rpc"
 	"github.com/ethereum-optimism/optimism/op-service/sources"
 )
@@ -108,13 +110,17 @@ var (
 		Category: L1RPCCategory,
 	}
 	SyncModeFlag = &cli.GenericFlag{
-		Name:    "syncmode",
-		Usage:   fmt.Sprintf("Blockchain sync mode (options: %s)", openum.EnumString(sync.ModeStrings)),
-		EnvVars: prefixEnvVars("SYNCMODE"),
-		Value: func() *sync.Mode {
-			out := sync.CLSync
-			return &out
-		}(),
+		Name:     "syncmode",
+		Usage:    fmt.Sprintf("Blockchain sync mode (options: %s)", openum.EnumString(sync.ModeStrings)),
+		EnvVars:  prefixEnvVars("SYNCMODE"),
+		Value:    ptr.New(sync.CLSync),
+		Category: RollupCategory,
+	}
+	SyncModeReqRespFlag = &cli.BoolFlag{
+		Name:     "syncmode.req-resp",
+		Required: false,
+		Value:    true,
+		EnvVars:  prefixEnvVars("SYNCMODE_REQ_RESP"),
 		Category: RollupCategory,
 	}
 	RPCAdminPersistence = &cli.StringFlag{
@@ -171,7 +177,7 @@ var (
 	L1CacheSize = &cli.UintFlag{
 		Name: "l1.cache-size",
 		Usage: "Cache size for blocks, receipts and transactions. " +
-			"If this flag is set to 0, 2/3 of the sequencing window size is used (usually 2400). " +
+			"If this flag is set to 0, 3/2 of the sequencing window size is used (usually 2400). " +
 			"The default value of 900 (~3h of L1 blocks) is good for (high-throughput) networks that see frequent safe head increments. " +
 			"On (low-throughput) networks with infrequent safe head increments, it is recommended to set this value to 0, " +
 			"or a value that well covers the typical span between safe head increments. " +
@@ -186,6 +192,12 @@ var (
 		EnvVars:  prefixEnvVars("L1_HTTP_POLL_INTERVAL"),
 		Value:    time.Second * 12,
 		Category: L1RPCCategory,
+	}
+	L1ChainConfig = &cli.PathFlag{
+		Name:     "rollup.l1-chain-config",
+		Usage:    "Path to .json file with the chain configuration for the L1, either in the direct format or genesis.json format (i.e. embedded under the .config property). Not necessary / will be ignored if using Ethereum mainnet or Sepolia as an L1.",
+		EnvVars:  prefixEnvVars("ROLLUP_L1_CHAIN_CONFIG"),
+		Category: RollupCategory,
 	}
 	L2EngineKind = &cli.GenericFlag{
 		Name: "l2.enginekind",
@@ -204,6 +216,20 @@ var (
 		EnvVars:  prefixEnvVars("L2_ENGINE_RPC_TIMEOUT"),
 		Value:    time.Second * 10,
 		Category: RollupCategory,
+	}
+	L2UnsafeOnly = &cli.BoolFlag{
+		Name:     "l2.unsafe-only",
+		Usage:    "Disable derivation",
+		EnvVars:  prefixEnvVars("L2_UNSAFE_ONLY"),
+		Category: RollupCategory,
+		Required: false,
+	}
+	L2FollowSource = &cli.StringFlag{
+		Name:     "l2.follow.source",
+		Usage:    "Address of L2 EL RPC HTTP endpoint to fetch safe/finalized blocks",
+		EnvVars:  prefixEnvVars("L2_FOLLOW_SOURCE"),
+		Category: RollupCategory,
+		Required: false,
 	}
 	VerifierL1Confs = &cli.Uint64Flag{
 		Name:     "verifier.l1-confs",
@@ -244,6 +270,18 @@ var (
 		EnvVars:  prefixEnvVars("SEQUENCER_RECOVER"),
 		Value:    false,
 		Category: SequencerCategory,
+	}
+	FinalityLookbackFlag = &cli.Uint64Flag{
+		Name:     "finality.lookback",
+		Usage:    "Number of L1 blocks to look back for finality verification. Uses default calculation if 0 (considers alt-DA challenge/resolve windows if applicable).",
+		EnvVars:  prefixEnvVars("FINALITY_LOOKBACK"),
+		Category: RollupCategory,
+	}
+	FinalityDelayFlag = &cli.Uint64Flag{
+		Name:     "finality.delay",
+		Usage:    "Number of L1 blocks to traverse before trying to finalize L2 blocks again. Uses default (64) if 0.",
+		EnvVars:  prefixEnvVars("FINALITY_DELAY"),
+		Category: RollupCategory,
 	}
 	L1EpochPollIntervalFlag = &cli.DurationFlag{
 		Name:     "l1.epoch-poll-interval",
@@ -429,6 +467,7 @@ var optionalFlags = []cli.Flag{
 	BeaconCheckIgnore,
 	BeaconFetchAllSidecars,
 	SyncModeFlag,
+	SyncModeReqRespFlag,
 	FetchWithdrawalRootFromState,
 	L1TrustRPC,
 	L1RPCProviderKind,
@@ -443,6 +482,8 @@ var optionalFlags = []cli.Flag{
 	SequencerMaxSafeLagFlag,
 	SequencerL1Confs,
 	SequencerRecoverMode,
+	FinalityLookbackFlag,
+	FinalityDelayFlag,
 	L1EpochPollIntervalFlag,
 	RuntimeConfigReloadIntervalFlag,
 	RPCAdminPersistence,
@@ -456,8 +497,11 @@ var optionalFlags = []cli.Flag{
 	ConductorRpcFlag,
 	ConductorRpcTimeoutFlag,
 	SafeDBPath,
+	L1ChainConfig,
 	L2EngineKind,
 	L2EngineRpcTimeout,
+	L2UnsafeOnly,
+	L2FollowSource,
 	InteropRPCAddr,
 	InteropRPCPort,
 	InteropJWTSecret,
@@ -497,7 +541,7 @@ func init() {
 	Flags = append(requiredFlags, optionalFlags...)
 }
 
-func CheckRequired(ctx *cli.Context) error {
+func CheckRequired(ctx cliiface.Context) error {
 	for _, f := range requiredFlags {
 		if !ctx.IsSet(f.Names()[0]) {
 			return fmt.Errorf("flag %s is required", f.Names()[0])

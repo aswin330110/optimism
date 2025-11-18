@@ -425,10 +425,11 @@ func TestProposals(t *testing.T) {
 		require.NotNil(t, proposer.DisputeGameFactoryAddr)
 		gameFactoryAddr := *proposer.DisputeGameFactoryAddr
 
-		rpcClient, err := dial.DialRPCClientWithTimeout(context.Background(), time.Minute, logger, s2.L1().UserRPC().RPC())
+		rpcClient, err := dial.DialRPCClientWithTimeout(context.Background(), logger, s2.L1().UserRPC().RPC())
 		require.NoError(t, err)
 		caller := batching.NewMultiCaller(rpcClient, batching.DefaultBatchSize)
-		factory := contracts.NewDisputeGameFactoryContract(metrics.NoopContractMetrics, gameFactoryAddr, caller)
+		factory, err := contracts.NewDisputeGameFactoryContract(context.Background(), metrics.NoopContractMetrics, gameFactoryAddr, caller)
+		require.NoError(t, err)
 		ethClient := ethclient.NewClient(rpcClient)
 		require.Eventually(t, func() bool {
 			head, err := ethClient.BlockByNumber(context.Background(), nil)

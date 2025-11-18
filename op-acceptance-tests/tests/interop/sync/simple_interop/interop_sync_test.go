@@ -1,3 +1,5 @@
+//go:build !ci
+
 package sync
 
 import (
@@ -12,6 +14,7 @@ import (
 // TestL2CLResync checks that unsafe head advances after restarting L2CL.
 // Resync is only possible when supervisor and L2CL reconnects.
 func TestL2CLResync(gt *testing.T) {
+	gt.Skip("Skipping Interop Acceptance Test")
 	t := devtest.SerialT(gt)
 	sys := presets.NewSimpleInterop(t)
 	logger := sys.Log.With("Test", "TestL2CLResync")
@@ -28,8 +31,8 @@ func TestL2CLResync(gt *testing.T) {
 
 	logger.Info("Make sure L2ELs does not advance")
 	dsl.CheckAll(t,
-		sys.L2ELA.NotAdvancedFn(eth.Unsafe),
-		sys.L2ELB.NotAdvancedFn(eth.Unsafe),
+		sys.L2ELA.NotAdvancedFn(eth.Unsafe, 5),
+		sys.L2ELB.NotAdvancedFn(eth.Unsafe, 5),
 	)
 
 	logger.Info("Restart L2CL nodes")

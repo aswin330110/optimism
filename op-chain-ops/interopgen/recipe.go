@@ -77,7 +77,6 @@ func (recipe *InteropDevRecipe) Build(addrs devkeys.Addresses) (*WorldConfig, er
 		Challenger:            challenger,
 		Deployer:              superchainDeployer,
 		Implementations: OPCMImplementationsConfig{
-			L1ContractsRelease: "dev",
 			FaultProof: SuperFaultProofConfig{
 				WithdrawalDelaySeconds:          big.NewInt(302400),
 				MinProposalSizeBytes:            big.NewInt(10000),
@@ -187,6 +186,10 @@ func (r *InteropDevL2Recipe) build(l1ChainID uint64, addrs devkeys.Addresses) (*
 	if err != nil {
 		return nil, err
 	}
+	operatorFeeVaultRecipient, err := addrs.Address(chainOps(devkeys.OperatorFeeVaultRecipientRole))
+	if err != nil {
+		return nil, err
+	}
 	sequencerP2P, err := addrs.Address(chainOps(devkeys.SequencerP2PRole))
 	if err != nil {
 		return nil, err
@@ -229,12 +232,15 @@ func (r *InteropDevL2Recipe) build(l1ChainID uint64, addrs devkeys.Addresses) (*
 				BaseFeeVaultRecipient:                    baseFeeVaultRecipient,
 				L1FeeVaultRecipient:                      l1FeeVaultRecipient,
 				SequencerFeeVaultRecipient:               sequencerFeeVaultRecipient,
+				OperatorFeeVaultRecipient:                operatorFeeVaultRecipient,
 				BaseFeeVaultMinimumWithdrawalAmount:      (*hexutil.Big)(Ether(10)),
 				L1FeeVaultMinimumWithdrawalAmount:        (*hexutil.Big)(Ether(10)),
 				SequencerFeeVaultMinimumWithdrawalAmount: (*hexutil.Big)(Ether(10)),
+				OperatorFeeVaultMinimumWithdrawalAmount:  (*hexutil.Big)(Ether(10)),
 				BaseFeeVaultWithdrawalNetwork:            "remote",
 				L1FeeVaultWithdrawalNetwork:              "remote",
 				SequencerFeeVaultWithdrawalNetwork:       "remote",
+				OperatorFeeVaultWithdrawalNetwork:        "remote",
 			},
 			GovernanceDeployConfig: genesis.GovernanceDeployConfig{
 				EnableGovernance: false,
@@ -264,8 +270,8 @@ func (r *InteropDevL2Recipe) build(l1ChainID uint64, addrs devkeys.Addresses) (*
 				L2GenesisGraniteTimeOffset:  new(hexutil.Uint64),
 				L2GenesisHoloceneTimeOffset: new(hexutil.Uint64),
 				L2GenesisIsthmusTimeOffset:  new(hexutil.Uint64),
+				L2GenesisJovianTimeOffset:   new(hexutil.Uint64),
 				L2GenesisInteropTimeOffset:  (*hexutil.Uint64)(&r.InteropOffset),
-				L2GenesisJovianTimeOffset:   nil,
 				L1CancunTimeOffset:          new(hexutil.Uint64),
 				L1PragueTimeOffset:          new(hexutil.Uint64),
 			},
@@ -282,6 +288,10 @@ func (r *InteropDevL2Recipe) build(l1ChainID uint64, addrs devkeys.Addresses) (*
 			},
 			AltDADeployConfig: genesis.AltDADeployConfig{
 				UseAltDA: false,
+			},
+			RevenueShareDeployConfig: genesis.RevenueShareDeployConfig{
+				UseRevenueShare:    false,
+				ChainFeesRecipient: common.Address{},
 			},
 		},
 		Prefund:                 make(map[common.Address]*big.Int),

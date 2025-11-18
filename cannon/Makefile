@@ -30,7 +30,6 @@ cannon64-impl:
 # Each embed is suffixed with the latest `StateVersion` number corresponding to the target VM and architecture.
 cannon-embeds: cannon64-impl
 	# 64-bit multithreaded vm
-	@cp bin/cannon64-impl ./multicannon/embeds/cannon-7
 	@cp bin/cannon64-impl ./multicannon/embeds/cannon-8
 
 cannon: cannon-embeds
@@ -91,9 +90,9 @@ cannon-stf-verify:
 
 fuzz:
 	printf "%s\n" \
-		"go test $(FUZZLDFLAGS) -run NOTAREALTEST -v -fuzztime $(CANNON64_FUZZTIME) -fuzz=FuzzStateConsistencyMulOp ./mipsevm/tests" \
-		"go test $(FUZZLDFLAGS) -run NOTAREALTEST -v -fuzztime $(CANNON64_FUZZTIME) -fuzz=FuzzStateConsistencyMultOp ./mipsevm/tests" \
-		"go test $(FUZZLDFLAGS) -run NOTAREALTEST -v -fuzztime $(CANNON64_FUZZTIME) -fuzz=FuzzStateConsistencyMultuOp ./mipsevm/tests" \
+		"go test $(FUZZLDFLAGS) -run NOTAREALTEST -v -fuzztime $(CANNON64_FUZZTIME) -fuzz=FuzzMulOp ./mipsevm/tests" \
+		"go test $(FUZZLDFLAGS) -run NOTAREALTEST -v -fuzztime $(CANNON64_FUZZTIME) -fuzz=FuzzMultOp ./mipsevm/tests" \
+		"go test $(FUZZLDFLAGS) -run NOTAREALTEST -v -fuzztime $(CANNON64_FUZZTIME) -fuzz=FuzzMultuOp ./mipsevm/tests" \
 		"go test $(FUZZLDFLAGS) -run NOTAREALTEST -v -fuzztime $(CANNON64_FUZZTIME) -fuzz=FuzzStateSyscallBrk ./mipsevm/tests" \
 		"go test $(FUZZLDFLAGS) -run NOTAREALTEST -v -fuzztime $(CANNON64_FUZZTIME) -fuzz=FuzzStateSyscallMmap ./mipsevm/tests" \
 		"go test $(FUZZLDFLAGS) -run NOTAREALTEST -v -fuzztime $(CANNON64_FUZZTIME) -fuzz=FuzzStateSyscallExitGroup ./mipsevm/tests" \

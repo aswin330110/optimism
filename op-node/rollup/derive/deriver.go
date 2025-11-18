@@ -121,10 +121,12 @@ func (d *PipelineDeriver) AttachEmitter(em event.Emitter) {
 	d.emitter = em
 }
 
+func (d *PipelineDeriver) ResetPipeline() {
+	d.pipeline.Reset()
+}
+
 func (d *PipelineDeriver) OnEvent(ctx context.Context, ev event.Event) bool {
 	switch x := ev.(type) {
-	case rollup.ForceResetEvent:
-		d.pipeline.Reset()
 	case PipelineStepEvent:
 		// Don't generate attributes if there are already attributes in-flight
 		if d.needAttributesConfirmation {
@@ -186,11 +188,11 @@ func (d *PipelineDeriver) OnEvent(ctx context.Context, ev event.Event) bool {
 	case ProvideL1Traversal:
 		if l1t, ok := d.pipeline.traversal.(ManagedL1Traversal); ok {
 			if err := l1t.ProvideNextL1(d.ctx, x.NextL1); err != nil {
-				if err != nil && errors.Is(err, ErrReset) {
+				if errors.Is(err, ErrReset) {
 					d.emitter.Emit(ctx, rollup.ResetEvent{Err: err})
-				} else if err != nil && errors.Is(err, ErrTemporary) {
+				} else if errors.Is(err, ErrTemporary) {
 					d.emitter.Emit(ctx, rollup.L1TemporaryErrorEvent{Err: err})
-				} else if err != nil && errors.Is(err, ErrCritical) {
+				} else if errors.Is(err, ErrCritical) {
 					d.emitter.Emit(ctx, rollup.CriticalErrorEvent{Err: err})
 				} else {
 					d.emitter.Emit(ctx, rollup.L1TemporaryErrorEvent{Err: err})

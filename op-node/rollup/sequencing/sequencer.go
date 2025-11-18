@@ -13,6 +13,7 @@ import (
 	"github.com/ethereum/go-ethereum/log"
 
 	"github.com/ethereum-optimism/optimism/op-node/rollup"
+	"github.com/ethereum-optimism/optimism/op-node/rollup/attributes"
 	"github.com/ethereum-optimism/optimism/op-node/rollup/conductor"
 	"github.com/ethereum-optimism/optimism/op-node/rollup/derive"
 	"github.com/ethereum-optimism/optimism/op-node/rollup/engine"
@@ -103,6 +104,8 @@ type Sequencer struct {
 
 	emitter event.Emitter
 
+	eng attributes.EngineController
+
 	attrBuilder      derive.AttributesBuilder
 	l1OriginSelector L1OriginSelectorIface
 
@@ -134,6 +137,7 @@ func NewSequencer(driverCtx context.Context, log log.Logger, rollupCfg *rollup.C
 	conductor conductor.SequencerConductor,
 	asyncGossip AsyncGossiper,
 	metrics Metrics,
+	eng attributes.EngineController,
 ) *Sequencer {
 	return &Sequencer{
 		ctx:              driverCtx,
@@ -146,6 +150,7 @@ func NewSequencer(driverCtx context.Context, log log.Logger, rollupCfg *rollup.C
 		attrBuilder:      attributesBuilder,
 		l1OriginSelector: l1OriginSelector,
 		metrics:          metrics,
+		eng:              eng,
 		timeNow:          time.Now,
 		toBlockRef:       derive.PayloadToBlockRef,
 	}
@@ -484,7 +489,7 @@ func (d *Sequencer) startBuildingBlock() {
 
 	// If we do not have data to know what to build on, then request a forkchoice update
 	if l2Head == (eth.L2BlockRef{}) {
-		d.emitter.Emit(d.ctx, engine.ForkchoiceRequestEvent{})
+		d.eng.RequestForkchoiceUpdate(d.ctx)
 		return
 	}
 	// If we have already started trying to build on top of this block, we can avoid starting over again.
@@ -566,6 +571,12 @@ func (d *Sequencer) startBuildingBlock() {
 		d.log.Info("Sequencing Isthmus upgrade block")
 	}
 
+	// For the Jovian activation block we must not include any sequencer transactions.
+	if d.rollupCfg.IsJovianActivationBlock(uint64(attrs.Timestamp)) {
+		attrs.NoTxPool = true
+		d.log.Info("Sequencing Jovian upgrade block")
+	}
+
 	// For the Interop activation block we must not include any sequencer transactions.
 	if d.rollupCfg.IsInteropActivationBlock(uint64(attrs.Timestamp)) {
 		attrs.NoTxPool = true
@@ -645,7 +656,7 @@ func (d *Sequencer) Init(ctx context.Context, active bool) error {
 	d.asyncGossip.Start()
 
 	// The `latestHead` should be updated, so we can handle start-sequencer requests
-	d.emitter.Emit(d.ctx, engine.ForkchoiceRequestEvent{})
+	d.eng.RequestForkchoiceUpdate(d.ctx)
 
 	if active {
 		return d.forceStart()

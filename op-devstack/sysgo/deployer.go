@@ -4,14 +4,11 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"slices"
 	"time"
 
-	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/core"
-	"github.com/ethereum/go-ethereum/log"
-	"github.com/holiman/uint256"
-
 	"github.com/ethereum-optimism/optimism/op-chain-ops/devkeys"
+	opforks "github.com/ethereum-optimism/optimism/op-core/forks"
 	"github.com/ethereum-optimism/optimism/op-deployer/pkg/deployer"
 	"github.com/ethereum-optimism/optimism/op-deployer/pkg/deployer/artifacts"
 	"github.com/ethereum-optimism/optimism/op-deployer/pkg/deployer/inspect"
@@ -23,10 +20,17 @@ import (
 	"github.com/ethereum-optimism/optimism/op-service/eth"
 	"github.com/ethereum-optimism/optimism/op-service/testreq"
 	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/depset"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core"
+	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/params/forks"
+	"github.com/holiman/uint256"
 )
 
 // funderMnemonicIndex the funding account is not one of the 30 standard account, but still derived from a user-key.
 const funderMnemonicIndex = 10_000
+const devFeatureBitmapKey = "devFeatureBitmap"
 
 type DeployerOption func(p devtest.P, keys devkeys.Keys, builder intentbuilder.Builder)
 
@@ -39,7 +43,59 @@ func WithDeployerOptions(opts ...DeployerOption) stack.Option[*Orchestrator] {
 	})
 }
 
+func WithForkAtL1Genesis(fork forks.Fork) DeployerOption {
+	return func(_ devtest.P, _ devkeys.Keys, builder intentbuilder.Builder) {
+		builder.L1().WithL1ForkAtGenesis(fork)
+	}
+}
+
+func WithForkAtL1Offset(fork forks.Fork, offset uint64) DeployerOption {
+	return func(_ devtest.P, _ devkeys.Keys, builder intentbuilder.Builder) {
+		builder.L1().WithL1ForkAtOffset(fork, &offset)
+	}
+}
+
+func WithDefaultBPOBlobSchedule(_ devtest.P, _ devkeys.Keys, builder intentbuilder.Builder) {
+	// Once we get the latest changes from op-geth we can change this to
+	// params.DefaultBlobSchedule.
+	builder.L1().WithL1BlobSchedule(&params.BlobScheduleConfig{
+		Cancun: params.DefaultCancunBlobConfig,
+		Osaka:  params.DefaultOsakaBlobConfig,
+		Prague: params.DefaultPragueBlobConfig,
+		BPO1:   params.DefaultBPO1BlobConfig,
+		BPO2:   params.DefaultBPO2BlobConfig,
+		BPO3:   params.DefaultBPO3BlobConfig,
+		BPO4:   params.DefaultBPO4BlobConfig,
+	})
+}
+
+func WithJovianAtGenesis(p devtest.P, _ devkeys.Keys, builder intentbuilder.Builder) {
+	for _, l2Cfg := range builder.L2s() {
+		l2Cfg.WithForkAtGenesis(opforks.Jovian)
+	}
+}
+
 type DeployerPipelineOption func(wb *worldBuilder, intent *state.Intent, cfg *deployer.ApplyPipelineOpts)
+
+func WithDeployerCacheDir(dirPath string) DeployerPipelineOption {
+	return func(_ *worldBuilder, _ *state.Intent, cfg *deployer.ApplyPipelineOpts) {
+		cfg.CacheDir = dirPath
+	}
+}
+
+// WithDAFootprintGasScalar sets the DA footprint gas scalar with which the networks identified by
+// l2IDs will be launched. If there are no l2IDs provided, all L2 networks are set with scalar.
+func WithDAFootprintGasScalar(scalar uint16, l2IDs ...stack.L2NetworkID) DeployerOption {
+	return func(p devtest.P, _ devkeys.Keys, builder intentbuilder.Builder) {
+		for _, l2 := range builder.L2s() {
+			if len(l2IDs) == 0 || slices.ContainsFunc(l2IDs, func(id stack.L2NetworkID) bool {
+				return id.ChainID() == l2.ChainID()
+			}) {
+				l2.WithDAFootprintGasScalar(scalar)
+			}
+		}
+	}
+}
 
 func WithDeployerPipelineOption(opt DeployerPipelineOption) stack.Option[*Orchestrator] {
 	return stack.BeforeDeploy(func(o *Orchestrator) {
@@ -113,9 +169,11 @@ func WithDeployer() stack.Option[*Orchestrator] {
 }
 
 type L2Deployment struct {
-	systemConfigProxyAddr   common.Address
-	disputeGameFactoryProxy common.Address
-	l1StandardBridgeProxy   common.Address
+	systemConfigProxyAddr          common.Address
+	disputeGameFactoryProxy        common.Address
+	l1StandardBridgeProxy          common.Address
+	proxyAdmin                     common.Address
+	permissionlessDelayedWETHProxy common.Address
 }
 
 var _ stack.L2Deployment = &L2Deployment{}
@@ -130,6 +188,14 @@ func (d *L2Deployment) DisputeGameFactoryProxyAddr() common.Address {
 
 func (d *L2Deployment) L1StandardBridgeProxyAddr() common.Address {
 	return d.l1StandardBridgeProxy
+}
+
+func (d *L2Deployment) ProxyAdminAddr() common.Address {
+	return d.proxyAdmin
+}
+
+func (d *L2Deployment) PermissionlessDelayedWETHProxyAddr() common.Address {
+	return d.permissionlessDelayedWETHProxy
 }
 
 type InteropMigration struct {
@@ -167,6 +233,13 @@ var (
 	millionEth = new(uint256.Int).Mul(uint256.NewInt(1e6), oneEth)
 )
 
+func WithEmbeddedContractSources() DeployerOption {
+	return func(_ devtest.P, _ devkeys.Keys, builder intentbuilder.Builder) {
+		builder.WithL1ContractsLocator(artifacts.EmbeddedLocator)
+		builder.WithL2ContractsLocator(artifacts.EmbeddedLocator)
+	}
+}
+
 func WithLocalContractSources() DeployerOption {
 	return func(p devtest.P, keys devkeys.Keys, builder intentbuilder.Builder) {
 		paths, err := contractPaths()
@@ -189,7 +262,7 @@ func WithCommons(l1ChainID eth.ChainID) DeployerOption {
 		l1StartTimestamp := uint64(time.Now().Unix()) + 1
 		l1Config.WithTimestamp(l1StartTimestamp)
 
-		l1Config.WithPragueOffset(0) // activate pectra on L1
+		l1Config.WithL1ForkAtGenesis(forks.Prague) // activate pectra on L1
 
 		faucetFunderAddr, err := keys.Address(devkeys.UserKey(funderMnemonicIndex))
 		p.Require().NoError(err, "need funder addr")
@@ -236,11 +309,51 @@ func WithPrefundedL2(l1ChainID, l2ChainID eth.ChainID) DeployerOption {
 	}
 }
 
+// WithDevFeatureEnabled adds a feature as enabled in the dev feature bitmap
+func WithDevFeatureEnabled(flag common.Hash) DeployerOption {
+	return func(p devtest.P, keys devkeys.Keys, builder intentbuilder.Builder) {
+		currentValue := builder.GlobalOverride(devFeatureBitmapKey)
+		var bitmap common.Hash
+		if currentValue != nil {
+			bitmap = currentValue.(common.Hash)
+		}
+		builder.WithGlobalOverride(devFeatureBitmapKey, deployer.EnableDevFeature(bitmap, flag))
+	}
+}
+
 // WithInteropAtGenesis activates interop at genesis for all known L2s
 func WithInteropAtGenesis() DeployerOption {
 	return func(p devtest.P, keys devkeys.Keys, builder intentbuilder.Builder) {
 		for _, l2Cfg := range builder.L2s() {
-			l2Cfg.WithForkAtGenesis(rollup.Interop)
+			l2Cfg.WithForkAtGenesis(opforks.Interop)
+		}
+	}
+}
+
+// WithHardforkSequentialActivation configures a deployment such that L2 chains
+// activate hardforks sequentially, starting from startFork and continuing
+// until (but not including) endFork. Each successive fork is scheduled at
+// an increasing offset.
+func WithHardforkSequentialActivation(startFork, endFork opforks.Name, delta *uint64) DeployerOption {
+	return func(p devtest.P, keys devkeys.Keys, builder intentbuilder.Builder) {
+		for _, l2Cfg := range builder.L2s() {
+			l2Cfg.WithForkAtGenesis(startFork)
+			activateWithOffset := false
+			deactivate := false
+			for idx, refFork := range opforks.All {
+				if deactivate || refFork == endFork {
+					l2Cfg.WithForkAtOffset(refFork, nil)
+					deactivate = true
+					continue
+				}
+				if activateWithOffset {
+					offset := *delta * uint64(idx)
+					l2Cfg.WithForkAtOffset(refFork, &offset)
+				}
+				if startFork == refFork {
+					activateWithOffset = true
+				}
+			}
 		}
 	}
 }
@@ -321,14 +434,24 @@ func (wb *worldBuilder) buildL2DeploymentOutputs() {
 	for _, ch := range wb.output.Chains {
 		chainID := eth.ChainIDFromBytes32(ch.ID)
 		wb.outL2Deployment[chainID] = &L2Deployment{
-			systemConfigProxyAddr:   ch.SystemConfigProxy,
-			disputeGameFactoryProxy: ch.DisputeGameFactoryProxy,
-			l1StandardBridgeProxy:   ch.L1StandardBridgeProxy,
+			systemConfigProxyAddr:          ch.SystemConfigProxy,
+			disputeGameFactoryProxy:        ch.DisputeGameFactoryProxy,
+			l1StandardBridgeProxy:          ch.L1StandardBridgeProxy,
+			proxyAdmin:                     ch.OpChainProxyAdminImpl,
+			permissionlessDelayedWETHProxy: ch.DelayedWethPermissionlessGameProxy,
 		}
 	}
 	wb.outSuperchainDeployment = &SuperchainDeployment{
 		protocolVersionsAddr: wb.output.SuperchainDeployment.ProtocolVersionsProxy,
 		superchainConfigAddr: wb.output.SuperchainDeployment.SuperchainConfigProxy,
+	}
+}
+
+func WithRevenueShare(enabled bool, chainFeesRecipient common.Address) DeployerOption {
+	return func(p devtest.P, keys devkeys.Keys, builder intentbuilder.Builder) {
+		for _, l2Cfg := range builder.L2s() {
+			l2Cfg.WithRevenueShare(enabled, chainFeesRecipient)
+		}
 	}
 }
 

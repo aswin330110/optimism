@@ -34,9 +34,26 @@ const defaultFinalityLookback = 4*32 + 1
 // We do not want to do this too often, since it requires fetching a L1 block by number, so no cache data.
 const finalityDelay = 64
 
+// Config contains runtime configuration for the finalizer.
+type Config struct {
+	// FinalityLookback specifies the number of L1 blocks to look back for finality verification.
+	// When nil, uses the default finality lookback calculation (which considers both
+	// the default lookback and alt-DA challenge/resolve windows if applicable).
+	FinalityLookback *uint64
+
+	// FinalityDelay specifies the number of L1 blocks to traverse before trying to finalize L2 blocks again.
+	// When nil, defaults to 64 blocks.
+	FinalityDelay *uint64
+}
+
 // calcFinalityLookback calculates the default finality lookback based on DA challenge window if altDA
 // mode is activated or L1 finality lookback.
-func calcFinalityLookback(cfg *rollup.Config) uint64 {
+func calcFinalityLookback(cfg *rollup.Config, finalizerCfg *Config) uint64 {
+	// If a custom finality lookback is configured, use it as an override
+	if finalizerCfg != nil && finalizerCfg.FinalityLookback != nil {
+		return *finalizerCfg.FinalityLookback
+	}
+
 	// in alt-da mode the longest finality lookback is a commitment is challenged on the last block of
 	// the challenge window in which case it will be both challenge + resolve window.
 	if cfg.AltDAEnabled() {
@@ -47,6 +64,15 @@ func calcFinalityLookback(cfg *rollup.Config) uint64 {
 		}
 	}
 	return defaultFinalityLookback
+}
+
+// calcFinalityDelay calculates the finality delay based on the runtime config or returns the default.
+func calcFinalityDelay(finalizerCfg *Config) uint64 {
+	// If a custom finality delay is configured, use it as an override
+	if finalizerCfg != nil && finalizerCfg.FinalityDelay != nil {
+		return *finalizerCfg.FinalityDelay
+	}
+	return finalityDelay
 }
 
 type FinalityData struct {
@@ -66,6 +92,10 @@ type FinalizerL1Interface interface {
 	L1BlockRefByNumber(context.Context, uint64) (eth.L1BlockRef, error)
 }
 
+type EngineController interface {
+	PromoteFinalized(context.Context, eth.L2BlockRef)
+}
+
 type Finalizer struct {
 	mu sync.Mutex
 
@@ -76,6 +106,8 @@ type Finalizer struct {
 	cfg *rollup.Config
 
 	emitter event.Emitter
+
+	engineController EngineController
 
 	// finalizedL1 is the currently perceived finalized L1 block.
 	// This may be ahead of the current traversed origin when syncing.
@@ -93,19 +125,28 @@ type Finalizer struct {
 	// Maximum amount of L2 blocks to store in finalityData.
 	finalityLookback uint64
 
+	// Number of L1 blocks to traverse before trying to finalize L2 blocks again.
+	finalityDelay uint64
+
 	l1Fetcher FinalizerL1Interface
 }
 
-func NewFinalizer(ctx context.Context, log log.Logger, cfg *rollup.Config, l1Fetcher FinalizerL1Interface) *Finalizer {
-	lookback := calcFinalityLookback(cfg)
+// NewFinalizer creates a new Finalizer instance.
+// The finalizerCfg parameter is optional and may be nil to use default finality behavior.
+// When non-nil, any non-nil fields in finalizerCfg will override the defaults.
+func NewFinalizer(ctx context.Context, log log.Logger, cfg *rollup.Config, finalizerCfg *Config, l1Fetcher FinalizerL1Interface, ec EngineController) *Finalizer {
+	lookback := calcFinalityLookback(cfg, finalizerCfg)
+	delay := calcFinalityDelay(finalizerCfg)
 	return &Finalizer{
 		ctx:              ctx,
 		cfg:              cfg,
 		log:              log,
 		finalizedL1:      eth.L1BlockRef{},
+		engineController: ec,
 		triedFinalizeAt:  0,
 		finalityData:     make([]FinalityData, 0, lookback),
 		finalityLookback: lookback,
+		finalityDelay:    delay,
 		l1Fetcher:        l1Fetcher,
 	}
 }
@@ -123,14 +164,6 @@ func (fi *Finalizer) FinalizedL1() (out eth.L1BlockRef) {
 	return
 }
 
-type FinalizeL1Event struct {
-	FinalizedL1 eth.L1BlockRef
-}
-
-func (ev FinalizeL1Event) String() string {
-	return "finalized-l1"
-}
-
 type TryFinalizeEvent struct {
 }
 
@@ -139,9 +172,9 @@ func (ev TryFinalizeEvent) String() string {
 }
 
 func (fi *Finalizer) OnEvent(ctx context.Context, ev event.Event) bool {
+	// TODO(#16917) Remove Event System Refactor Comments
+	//  FinalizeL1Event is removed and OnL1Finalized is synchronously called at L1Handler
 	switch x := ev.(type) {
-	case FinalizeL1Event:
-		fi.onL1Finalized(x.FinalizedL1)
 	case engine.SafeDerivedEvent:
 		fi.onDerivedSafeBlock(x.Safe, x.Source)
 	case derive.DeriverIdleEvent:
@@ -159,7 +192,7 @@ func (fi *Finalizer) OnEvent(ctx context.Context, ev event.Event) bool {
 }
 
 // onL1Finalized applies a L1 finality signal
-func (fi *Finalizer) onL1Finalized(l1Origin eth.L1BlockRef) {
+func (fi *Finalizer) OnL1Finalized(l1Origin eth.L1BlockRef) {
 	fi.mu.Lock()
 	defer fi.mu.Unlock()
 	prevFinalizedL1 := fi.finalizedL1
@@ -196,7 +229,7 @@ func (fi *Finalizer) onDerivationIdle(derivedFrom eth.L1BlockRef) {
 		return // if no L1 information is finalized yet, then skip this
 	}
 	// If we recently tried finalizing, then don't try again just yet, but traverse more of L1 first.
-	if fi.triedFinalizeAt != 0 && derivedFrom.Number <= fi.triedFinalizeAt+finalityDelay {
+	if fi.triedFinalizeAt != 0 && derivedFrom.Number <= fi.triedFinalizeAt+fi.finalityDelay {
 		return
 	}
 	fi.log.Debug("processing L1 finality information", "l1_finalized", fi.finalizedL1, "derived_from", derivedFrom, "previous", fi.triedFinalizeAt)
@@ -255,7 +288,7 @@ func (fi *Finalizer) tryFinalize() {
 			})
 			return
 		}
-		fi.emitter.Emit(fi.ctx, engine.PromoteFinalizedEvent{Ref: finalizedL2})
+		fi.engineController.PromoteFinalized(ctx, finalizedL2)
 	}
 }
 

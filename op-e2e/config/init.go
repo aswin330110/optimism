@@ -1,7 +1,6 @@
 package config
 
 import (
-	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -13,12 +12,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ethereum-optimism/optimism/cannon/mipsevm/versions"
+	"github.com/ethereum-optimism/optimism/op-core/forks"
 	"github.com/ethereum-optimism/optimism/op-deployer/pkg/deployer"
 	"github.com/ethereum-optimism/optimism/op-deployer/pkg/deployer/artifacts"
 	"github.com/ethereum-optimism/optimism/op-deployer/pkg/deployer/inspect"
 	"github.com/ethereum-optimism/optimism/op-deployer/pkg/deployer/pipeline"
+	"github.com/ethereum-optimism/optimism/op-deployer/pkg/deployer/standard"
 	"github.com/ethereum-optimism/optimism/op-deployer/pkg/deployer/state"
-	"github.com/ethereum-optimism/optimism/op-node/rollup"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"golang.org/x/exp/maps"
@@ -51,9 +52,9 @@ type AllocType string
 
 const (
 	AllocTypeAltDA        AllocType = "alt-da"
-	AllocTypeL2OO         AllocType = "l2oo"
 	AllocTypeMTCannon     AllocType = "mt-cannon"
 	AllocTypeMTCannonNext AllocType = "mt-cannon-next"
+	AllocTypeFastGame     AllocType = "fast-game"
 
 	DefaultAllocType = AllocTypeMTCannon
 )
@@ -65,16 +66,7 @@ func (a AllocType) Check() error {
 	return nil
 }
 
-func (a AllocType) UsesProofs() bool {
-	switch a {
-	case AllocTypeMTCannon, AllocTypeMTCannonNext, AllocTypeAltDA:
-		return true
-	default:
-		return false
-	}
-}
-
-var allocTypes = []AllocType{AllocTypeAltDA, AllocTypeL2OO, AllocTypeMTCannon, AllocTypeMTCannonNext}
+var allocTypes = []AllocType{AllocTypeAltDA, AllocTypeMTCannon, AllocTypeMTCannonNext, AllocTypeFastGame}
 
 var (
 	// All of the following variables are set in the init function
@@ -144,6 +136,10 @@ func DeployConfig(allocType AllocType) *genesis.DeployConfig {
 }
 
 func init() {
+	// Used by the rust team, to skip legacy op-e2e init. Not used by devstack acceptance tests.
+	if os.Getenv("DISABLE_OP_E2E_LEGACY") == "true" {
+		return
+	}
 	cwd, err := os.Getwd()
 	if err != nil {
 		panic(err)
@@ -185,49 +181,8 @@ func init() {
 	oplog.SetGlobalLogHandler(errHandler)
 
 	for _, allocType := range allocTypes {
-		if allocType == AllocTypeL2OO {
-			continue
-		}
-
 		initAllocType(root, allocType)
 	}
-
-	configPath := path.Join(root, "op-e2e", "config")
-	forks := []genesis.L2AllocsMode{
-		genesis.L2AllocsIsthmus,
-		genesis.L2AllocsHolocene,
-		genesis.L2AllocsGranite,
-		genesis.L2AllocsFjord,
-		genesis.L2AllocsEcotone,
-		genesis.L2AllocsDelta,
-	}
-
-	var l2OOAllocsL1 foundry.ForgeAllocs
-	decompressGzipJSON(path.Join(configPath, "allocs-l1.json.gz"), &l2OOAllocsL1)
-	l1AllocsByType[AllocTypeL2OO] = &l2OOAllocsL1
-
-	var l2OOAddresses genesis.L1Deployments
-	decompressGzipJSON(path.Join(configPath, "addresses.json.gz"), &l2OOAddresses)
-	l1DeploymentsByType[AllocTypeL2OO] = &l2OOAddresses
-
-	l2OODC := DeployConfig(DefaultAllocType)
-	l2OODC.SetDeployments(&l2OOAddresses)
-	deployConfigsByType[AllocTypeL2OO] = l2OODC
-
-	l2AllocsByType[AllocTypeL2OO] = genesis.L2AllocsModeMap{}
-	var wg sync.WaitGroup
-	for _, fork := range forks {
-		wg.Add(1)
-		go func(fork genesis.L2AllocsMode) {
-			defer wg.Done()
-			var l2OOAllocsL2 foundry.ForgeAllocs
-			decompressGzipJSON(path.Join(configPath, fmt.Sprintf("allocs-l2-%s.json.gz", fork)), &l2OOAllocsL2)
-			mtx.Lock()
-			l2AllocsByType[AllocTypeL2OO][fork] = &l2OOAllocsL2
-			mtx.Unlock()
-		}(fork)
-	}
-	wg.Wait()
 
 	// Use regular level going forward.
 	oplog.SetGlobalLogHandler(handler)
@@ -248,6 +203,7 @@ func initAllocType(root string, allocType AllocType) {
 
 	allocModes := []genesis.L2AllocsMode{
 		genesis.L2AllocsInterop,
+		genesis.L2AllocsJovian,
 		genesis.L2AllocsIsthmus,
 		genesis.L2AllocsHolocene,
 		genesis.L2AllocsGranite,
@@ -279,6 +235,26 @@ func initAllocType(root string, allocType AllocType) {
 					DAResolverRefundPercentage: 0,
 				}
 			}
+			if allocType == AllocTypeFastGame {
+				intent.GlobalDeployOverrides["preimageOracleChallengePeriod"] = 1
+				for _, chain := range intent.Chains {
+					chain.AdditionalDisputeGames = append(chain.AdditionalDisputeGames,
+						state.AdditionalDisputeGame{
+							ChainProofParams: state.ChainProofParams{
+								// Fast game
+								DisputeGameType: 254,
+								// Prestate doesn't matter as there's no time to play the game anyway.
+								DisputeAbsolutePrestate: common.HexToHash("0x03c7ae758795765c6664a5d39bf63841c71ff191e9189522bad8ebff5d4eca98"),
+								DisputeMaxGameDepth:     14 + 3 + 1,
+								DisputeSplitDepth:       14,
+								DisputeClockExtension:   0,
+								DisputeMaxClockDuration: 1,
+							},
+							VMType:        state.VMTypeAlphabet,
+							MakeRespected: true,
+						})
+				}
+			}
 
 			baseUpgradeSchedule := map[string]any{
 				"l2GenesisRegolithTimeOffset": nil,
@@ -289,10 +265,11 @@ func initAllocType(root string, allocType AllocType) {
 				"l2GenesisGraniteTimeOffset":  nil,
 				"l2GenesisHoloceneTimeOffset": nil,
 				"l2GenesisIsthmusTimeOffset":  nil,
+				"l2GenesisJovianTimeOffset":   nil,
 			}
 
 			upgradeSchedule := new(genesis.UpgradeScheduleDeployConfig)
-			upgradeSchedule.ActivateForkAtGenesis(rollup.ForkName(mode))
+			upgradeSchedule.ActivateForkAtGenesis(forks.Name(mode))
 			upgradeOverridesJSON, err := json.Marshal(upgradeSchedule)
 			if err != nil {
 				panic(fmt.Errorf("failed to marshal upgrade schedule: %w", err))
@@ -390,21 +367,23 @@ func defaultIntent(root string, loc *artifacts.Locator, deployer common.Address,
 			"baseFeeVaultMinimumWithdrawalAmount":      "0x8ac7230489e80000",
 			"l1FeeVaultMinimumWithdrawalAmount":        "0x8ac7230489e80000",
 			"sequencerFeeVaultMinimumWithdrawalAmount": "0x8ac7230489e80000",
+			"operatorFeeVaultMinimumWithdrawalAmount":  "0x8ac7230489e80000",
 			"baseFeeVaultWithdrawalNetwork":            0,
 			"l1FeeVaultWithdrawalNetwork":              0,
 			"sequencerFeeVaultWithdrawalNetwork":       0,
+			"operatorFeeVaultWithdrawalNetwork":        0,
 			"finalizationPeriodSeconds":                2,
 			"l2GenesisBlockBaseFeePerGas":              "0x1",
 			"gasPriceOracleOverhead":                   2100,
 			"gasPriceOracleScalar":                     1000000,
 			"gasPriceOracleBaseFeeScalar":              1368,
-			"gasPriceOracleBlobBaseFeeScalar":          810949,
+			"gasPriceOracleBlobBaseFeeScalar":          801949,
 			"gasPriceOracleOperatorFeeScalar":          0,
 			"gasPriceOracleOperatorFeeConstant":        0,
 			"l1CancunTimeOffset":                       "0x0",
 			"faultGameAbsolutePrestate":                defaultPrestate.Hex(),
 			"faultGameMaxDepth":                        50,
-			"faultGameClockExtension":                  0,
+			"faultGameClockExtension":                  1,
 			"faultGameMaxClockDuration":                1200,
 			"faultGameGenesisBlock":                    0,
 			"faultGameGenesisOutputRoot":               genesisOutputRoot.Hex(),
@@ -422,9 +401,11 @@ func defaultIntent(root string, loc *artifacts.Locator, deployer common.Address,
 				BaseFeeVaultRecipient:      common.HexToAddress("0x14dC79964da2C08b23698B3D3cc7Ca32193d9955"),
 				L1FeeVaultRecipient:        common.HexToAddress("0x23618e81E3f5cdF7f54C3d65f7FBc0aBf5B21E8f"),
 				SequencerFeeVaultRecipient: common.HexToAddress("0xa0Ee7A142d267C1f36714E4a8F75612F20a79720"),
+				OperatorFeeVaultRecipient:  common.HexToAddress("0x1CBd3b2770909D4e10f157cABC84C7264073C9Ec"),
 				Eip1559Denominator:         250,
 				Eip1559DenominatorCanyon:   250,
 				Eip1559Elasticity:          6,
+				GasLimit:                   standard.GasLimit,
 				Roles: state.ChainRoles{
 					// Use deployer as L1PAO to deploy additional dispute impls
 					L1ProxyAdminOwner: deployer,
@@ -435,23 +416,9 @@ func defaultIntent(root string, loc *artifacts.Locator, deployer common.Address,
 					Proposer:          addrs.Proposer,
 					Challenger:        common.HexToAddress("0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65"),
 				},
+				UseRevenueShare:    true,
+				ChainFeesRecipient: common.HexToAddress("0xBcd4042DE499D14e55001CcbB24a551F3b954096"),
 				AdditionalDisputeGames: []state.AdditionalDisputeGame{
-					{
-						ChainProofParams: state.ChainProofParams{
-							// Fast game
-							DisputeGameType:         254,
-							DisputeAbsolutePrestate: defaultPrestate,
-							DisputeMaxGameDepth:     14 + 3 + 1,
-							DisputeSplitDepth:       14,
-							DisputeClockExtension:   0,
-							DisputeMaxClockDuration: 0,
-						},
-						VMType:                       state.VMTypeAlphabet,
-						UseCustomOracle:              true,
-						OracleMinProposalSize:        10000,
-						OracleChallengePeriodSeconds: 0,
-						MakeRespected:                true,
-					},
 					{
 						ChainProofParams: state.ChainProofParams{
 							// Alphabet game
@@ -492,23 +459,6 @@ func ensureDir(dirPath string) error {
 	return nil
 }
 
-func decompressGzipJSON(p string, thing any) {
-	f, err := os.Open(p)
-	if err != nil {
-		panic(fmt.Errorf("failed to open file: %w", err))
-	}
-	defer f.Close()
-
-	gzr, err := gzip.NewReader(f)
-	if err != nil {
-		panic(fmt.Errorf("failed to create gzip reader: %w", err))
-	}
-	defer gzr.Close()
-	if err := json.NewDecoder(gzr).Decode(thing); err != nil {
-		panic(fmt.Errorf("failed to read gzip data: %w", err))
-	}
-}
-
 func cannonVMType(allocType AllocType) state.VMType {
 	if allocType == AllocTypeMTCannonNext {
 		return state.VMTypeCannonNext
@@ -540,7 +490,11 @@ func cannonPrestate(monorepoRoot string, allocType AllocType) common.Hash {
 		once = &cannonPrestateMTOnce
 		cacheVar = &cannonPrestateMT
 	} else if cannonVmType == state.VMTypeCannonNext {
-		filename = "prestate-proof-mt64Next.json"
+		if versions.GetCurrentVersion() != versions.GetExperimentalVersion() {
+			filename = "prestate-proof-mt64Next.json"
+		} else {
+			filename = "prestate-proof-mt64.json"
+		}
 		once = &cannonPrestateMTNextOnce
 		cacheVar = &cannonPrestateMTNext
 	} else {
@@ -550,7 +504,7 @@ func cannonPrestate(monorepoRoot string, allocType AllocType) common.Hash {
 	once.Do(func() {
 		f, err := os.Open(path.Join(monorepoRoot, "op-program", "bin", filename))
 		if err != nil {
-			log.Warn("error opening prestate file", "err", err)
+			log.Warn("error opening prestate file. If you're running a test that requires prestates, make sure you've run `make cannon-prestates`", "err", err)
 			return
 		}
 		defer f.Close()
@@ -558,12 +512,16 @@ func cannonPrestate(monorepoRoot string, allocType AllocType) common.Hash {
 		var prestate prestateFile
 		dec := json.NewDecoder(f)
 		if err := dec.Decode(&prestate); err != nil {
-			log.Warn("error decoding prestate file", "err", err)
+			log.Error("error decoding prestate file. If you're running a test that requires prestates, make sure you've run `make cannon-prestates`", "err", err)
 			return
 		}
 
 		*cacheVar = common.HexToHash(prestate.Pre)
 	})
 
+	// Provide a dummy value so that the DeployDisputeGame script succeeds. Many tests do not require a dispute game. So this allieviates the need to build prestates during local development.
+	if *cacheVar == (common.Hash{}) {
+		*cacheVar = common.HexToHash("0xc02b59f772cb23a75b6ffb9f7602ba25fdd5d8e75ad88efcc013fec2c63b0895") // keccak("dummy")
+	}
 	return *cacheVar
 }

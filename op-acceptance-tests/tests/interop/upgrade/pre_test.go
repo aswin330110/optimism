@@ -1,3 +1,5 @@
+//go:build !ci
+
 package upgrade
 
 import (
@@ -11,17 +13,20 @@ import (
 	"github.com/ethereum-optimism/optimism/devnet-sdk/contracts/constants"
 	"github.com/ethereum-optimism/optimism/op-acceptance-tests/tests/interop"
 	"github.com/ethereum-optimism/optimism/op-chain-ops/genesis"
+	"github.com/ethereum-optimism/optimism/op-core/predeploys"
 	"github.com/ethereum-optimism/optimism/op-devstack/devtest"
 	"github.com/ethereum-optimism/optimism/op-devstack/dsl"
 	"github.com/ethereum-optimism/optimism/op-devstack/presets"
 	"github.com/ethereum-optimism/optimism/op-devstack/stack/match"
 	"github.com/ethereum-optimism/optimism/op-service/eth"
-	"github.com/ethereum-optimism/optimism/op-service/predeploys"
 	"github.com/ethereum-optimism/optimism/op-service/txintent"
 	stypes "github.com/ethereum-optimism/optimism/op-supervisor/supervisor/types"
 )
 
+// This test is known to be flaky
+// See: https://github.com/ethereum-optimism/optimism/issues/17298
 func TestPreNoInbox(gt *testing.T) {
+	gt.Skip("Skipping Interop Acceptance Test")
 	t := devtest.ParallelT(gt)
 	sys := presets.NewSimpleInterop(t)
 	require := t.Require()

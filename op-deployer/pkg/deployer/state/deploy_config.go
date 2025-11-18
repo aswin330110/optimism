@@ -23,7 +23,7 @@ var (
 )
 
 func CombineDeployConfig(intent *Intent, chainIntent *ChainIntent, state *State, chainState *ChainState) (genesis.DeployConfig, error) {
-	upgradeSchedule := standard.DefaultHardforkScheduleForTag(intent.L1ContractsLocator.Tag)
+	upgradeSchedule := standard.DefaultHardforkScheduleForTag(standard.CurrentTag)
 
 	cfg := genesis.DeployConfig{
 		L1DependenciesConfig: genesis.L1DependenciesConfig{
@@ -39,29 +39,32 @@ func CombineDeployConfig(intent *Intent, chainIntent *ChainIntent, state *State,
 				FundDevAccounts: intent.FundDevAccounts,
 			},
 			L2GenesisBlockDeployConfig: genesis.L2GenesisBlockDeployConfig{
-				L2GenesisBlockGasLimit:      60_000_000,
+				L2GenesisBlockGasLimit:      hexutil.Uint64(chainIntent.GasLimit),
 				L2GenesisBlockBaseFeePerGas: &l2GenesisBlockBaseFeePerGas,
 			},
 			L2VaultsDeployConfig: genesis.L2VaultsDeployConfig{
 				BaseFeeVaultWithdrawalNetwork:            "local",
 				L1FeeVaultWithdrawalNetwork:              "local",
 				SequencerFeeVaultWithdrawalNetwork:       "local",
+				OperatorFeeVaultWithdrawalNetwork:        "local",
 				SequencerFeeVaultMinimumWithdrawalAmount: standard.VaultMinWithdrawalAmount,
 				BaseFeeVaultMinimumWithdrawalAmount:      standard.VaultMinWithdrawalAmount,
 				L1FeeVaultMinimumWithdrawalAmount:        standard.VaultMinWithdrawalAmount,
+				OperatorFeeVaultMinimumWithdrawalAmount:  standard.VaultMinWithdrawalAmount,
 				BaseFeeVaultRecipient:                    chainIntent.BaseFeeVaultRecipient,
 				L1FeeVaultRecipient:                      chainIntent.L1FeeVaultRecipient,
 				SequencerFeeVaultRecipient:               chainIntent.SequencerFeeVaultRecipient,
+				OperatorFeeVaultRecipient:                chainIntent.OperatorFeeVaultRecipient,
 			},
 			GovernanceDeployConfig: genesis.GovernanceDeployConfig{
 				EnableGovernance:      false,
 				GovernanceTokenSymbol: "OP",
 				GovernanceTokenName:   "Optimism",
-				GovernanceTokenOwner:  common.HexToAddress("0xDeaDDEaDDeAdDeAdDEAdDEaddeAddEAdDEAdDEad"),
+				GovernanceTokenOwner:  standard.GovernanceTokenOwner,
 			},
 			GasPriceOracleDeployConfig: genesis.GasPriceOracleDeployConfig{
-				GasPriceOracleBaseFeeScalar:       1368,
-				GasPriceOracleBlobBaseFeeScalar:   810949,
+				GasPriceOracleBaseFeeScalar:       standard.BasefeeScalar,
+				GasPriceOracleBlobBaseFeeScalar:   standard.BlobBaseFeeScalar,
 				GasPriceOracleOperatorFeeScalar:   chainIntent.OperatorFeeScalar,
 				GasPriceOracleOperatorFeeConstant: chainIntent.OperatorFeeConstant,
 			},
@@ -69,6 +72,10 @@ func CombineDeployConfig(intent *Intent, chainIntent *ChainIntent, state *State,
 				EIP1559Denominator:       chainIntent.Eip1559Denominator,
 				EIP1559DenominatorCanyon: 250,
 				EIP1559Elasticity:        chainIntent.Eip1559Elasticity,
+			},
+			RevenueShareDeployConfig: genesis.RevenueShareDeployConfig{
+				UseRevenueShare:    chainIntent.UseRevenueShare,
+				ChainFeesRecipient: chainIntent.ChainFeesRecipient,
 			},
 
 			// STOP! This struct sets the _default_ upgrade schedule for all chains.
@@ -94,6 +101,10 @@ func CombineDeployConfig(intent *Intent, chainIntent *ChainIntent, state *State,
 			OwnershipDeployConfig: genesis.OwnershipDeployConfig{
 				ProxyAdminOwner:  chainIntent.Roles.L2ProxyAdminOwner,
 				FinalSystemOwner: chainIntent.Roles.L1ProxyAdminOwner,
+			},
+			FeeMarketConfig: genesis.FeeMarketConfig{
+				MinBaseFee:           chainIntent.MinBaseFee,
+				DAFootprintGasScalar: chainIntent.DAFootprintGasScalar,
 			},
 		},
 		FaultProofDeployConfig: genesis.FaultProofDeployConfig{

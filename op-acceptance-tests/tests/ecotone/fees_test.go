@@ -4,10 +4,10 @@ import (
 	"math/big"
 	"testing"
 
+	"github.com/ethereum-optimism/optimism/op-core/forks"
 	"github.com/ethereum-optimism/optimism/op-devstack/devtest"
 	"github.com/ethereum-optimism/optimism/op-devstack/dsl"
 	"github.com/ethereum-optimism/optimism/op-devstack/presets"
-	"github.com/ethereum-optimism/optimism/op-node/rollup"
 	"github.com/ethereum-optimism/optimism/op-service/eth"
 )
 
@@ -16,8 +16,7 @@ func TestFees(gt *testing.T) {
 	sys := presets.NewMinimal(t)
 	require := t.Require()
 
-	err := dsl.RequiresL2Fork(t.Ctx(), sys, 0, rollup.Ecotone)
-	require.NoError(err, "Ecotone fork must be active for this test")
+	require.True(sys.L2Chain.IsForkActive(forks.Ecotone), "Ecotone fork must be active for this test")
 
 	alice := sys.FunderL2.NewFundedEOA(eth.OneTenthEther)
 	bob := sys.Wallet.NewEOA(sys.L2EL)
@@ -28,7 +27,7 @@ func TestFees(gt *testing.T) {
 
 	ecotoneFees.LogResults(result)
 
-	t.Log("Comprehensive Ecotone fees test completed successfully:",
+	t.Log("Ecotone fees test completed successfully",
 		"gasUsed", result.TransactionReceipt.GasUsed,
 		"l1Fee", result.L1Fee.String(),
 		"l2Fee", result.L2Fee.String(),

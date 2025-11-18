@@ -16,9 +16,9 @@ const (
 	ProofMaturityDelaySecondsFlagName       = "proof-maturity-delay-seconds"
 	DisputeGameFinalityDelaySecondsFlagName = "dispute-game-finality-delay-seconds"
 	MIPSVersionFlagName                     = "mips-version"
+	DevFeatureBitmapFlagName                = "dev-feature-bitmap"
 	ProxyOwnerFlagName                      = "proxy-owner"
 	SuperchainProxyAdminOwnerFlagName       = "superchain-proxy-admin-owner"
-	L1ContractsReleaseFlagName              = "l1-contracts-release"
 	ProtocolVersionsOwnerFlagName           = "protocol-versions-owner"
 	GuardianFlagName                        = "guardian"
 	PausedFlagName                          = "paused"
@@ -63,11 +63,41 @@ var (
 		EnvVars: deployer.PrefixEnvVar("DISPUTE_GAME_FINALITY_DELAY_SECONDS"),
 		Value:   standard.DisputeGameFinalityDelaySeconds,
 	}
+	DisputeMaxGameDepthFlag = &cli.Uint64Flag{
+		Name:    "dispute-max-game-depth",
+		Usage:   "Maximum depth of the dispute game tree (value as string). Defaults to the standard value.",
+		EnvVars: deployer.PrefixEnvVar("DISPUTE_MAX_GAME_DEPTH"),
+		Value:   standard.DisputeMaxGameDepth,
+	}
+	DisputeSplitDepthFlag = &cli.Uint64Flag{
+		Name:    "dispute-split-depth",
+		Usage:   "Depth at which the dispute game tree splits (value as string). Defaults to the standard value.",
+		EnvVars: deployer.PrefixEnvVar("DISPUTE_SPLIT_DEPTH"),
+		Value:   standard.DisputeSplitDepth,
+	}
+	DisputeClockExtensionFlag = &cli.Uint64Flag{
+		Name:    "dispute-clock-extension",
+		Usage:   "Clock extension in seconds for dispute game timing. Defaults to the standard value.",
+		EnvVars: deployer.PrefixEnvVar("DISPUTE_CLOCK_EXTENSION"),
+		Value:   standard.DisputeClockExtension,
+	}
+	DisputeMaxClockDurationFlag = &cli.Uint64Flag{
+		Name:    "dispute-max-clock-duration",
+		Usage:   "Maximum clock duration in seconds for dispute game timing. Defaults to the standard value.",
+		EnvVars: deployer.PrefixEnvVar("DISPUTE_MAX_CLOCK_DURATION"),
+		Value:   standard.DisputeMaxClockDuration,
+	}
 	MIPSVersionFlag = &cli.Uint64Flag{
 		Name:    MIPSVersionFlagName,
 		Usage:   "MIPS version.",
 		EnvVars: deployer.PrefixEnvVar("MIPS_VERSION"),
 		Value:   standard.MIPSVersion,
+	}
+	DevFeatureBitmapFlag = &cli.StringFlag{
+		Name:    DevFeatureBitmapFlagName,
+		Usage:   "Development feature bitmap.",
+		EnvVars: deployer.PrefixEnvVar("DEV_FEATURE_BITMAP"),
+		Value:   common.Hash{}.Hex(),
 	}
 	ProxyOwnerFlag = &cli.StringFlag{
 		Name:    ProxyOwnerFlagName,
@@ -80,12 +110,6 @@ var (
 		Usage:   "Owner address for the superchain proxy admin",
 		EnvVars: deployer.PrefixEnvVar("SUPERCHAIN_PROXY_ADMIN_OWNER"),
 		Value:   common.Address{}.Hex(),
-	}
-	L1ContractsReleaseFlag = &cli.StringFlag{
-		Name:    L1ContractsReleaseFlagName,
-		Usage:   "L1 contracts release",
-		EnvVars: deployer.PrefixEnvVar("L1_CONTRACTS_RELEASE"),
-		Value:   "dev",
 	}
 	ProtocolVersionsOwnerFlag = &cli.StringFlag{
 		Name:    ProtocolVersionsOwnerFlagName,
@@ -124,10 +148,11 @@ var (
 		Usage:   "Protocol versions proxy.",
 		EnvVars: deployer.PrefixEnvVar("PROTOCOL_VERSIONS_PROXY"),
 	}
-	UpgradeControllerFlag = &cli.StringFlag{
-		Name:    "upgrade-controller",
-		Usage:   "Upgrade controller.",
-		EnvVars: deployer.PrefixEnvVar("UPGRADE_CONTROLLER"),
+	L1ProxyAdminOwnerFlag = &cli.StringFlag{
+		Name:    "l1-proxy-admin-owner",
+		Aliases: []string{"upgrade-controller"},
+		Usage:   "L1 ProxyAdmin Owner.",
+		EnvVars: append(deployer.PrefixEnvVar("L1_PROXY_ADMIN_OWNER"), deployer.PrefixEnvVar("UPGRADE_CONTROLLER")...),
 	}
 	SuperchainProxyAdminFlag = &cli.StringFlag{
 		Name:    "superchain-proxy-admin",
@@ -139,6 +164,11 @@ var (
 		Usage:   "Path to a JSON file",
 		EnvVars: deployer.PrefixEnvVar("CONFIG"),
 	}
+	ChallengerFlag = &cli.StringFlag{
+		Name:    "challenger",
+		Usage:   "Challenger.",
+		EnvVars: deployer.PrefixEnvVar("CHALLENGER"),
+	}
 )
 
 var ImplementationsFlags = []cli.Flag{
@@ -147,16 +177,21 @@ var ImplementationsFlags = []cli.Flag{
 	OutfileFlag,
 	deployer.ArtifactsLocatorFlag,
 	MIPSVersionFlag,
+	DevFeatureBitmapFlag,
 	WithdrawalDelaySecondsFlag,
 	MinProposalSizeBytesFlag,
 	ChallengePeriodSecondsFlag,
 	ProofMaturityDelaySecondsFlag,
 	DisputeGameFinalityDelaySecondsFlag,
-	L1ContractsReleaseFlag,
+	DisputeMaxGameDepthFlag,
+	DisputeSplitDepthFlag,
+	DisputeClockExtensionFlag,
+	DisputeMaxClockDurationFlag,
 	SuperchainConfigProxyFlag,
 	ProtocolVersionsProxyFlag,
-	UpgradeControllerFlag,
+	L1ProxyAdminOwnerFlag,
 	SuperchainProxyAdminFlag,
+	ChallengerFlag,
 }
 
 var ProxyFlags = []cli.Flag{
@@ -194,12 +229,6 @@ var Commands = []*cli.Command{
 		Usage:  "Bootstraps implementations.",
 		Flags:  cliapp.ProtectFlags(ImplementationsFlags),
 		Action: ImplementationsCLI,
-	},
-	{
-		Name:   "proxy",
-		Usage:  "Bootstrap a ERC-1967 Proxy without an implementation set.",
-		Flags:  cliapp.ProtectFlags(ProxyFlags),
-		Action: ProxyCLI,
 	},
 	{
 		Name:   "superchain",

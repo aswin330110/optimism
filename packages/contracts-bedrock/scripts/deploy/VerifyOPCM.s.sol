@@ -12,6 +12,7 @@ import { LibString } from "@solady/utils/LibString.sol";
 import { Process } from "scripts/libraries/Process.sol";
 import { Config } from "scripts/libraries/Config.sol";
 import { Bytes } from "src/libraries/Bytes.sol";
+import { DevFeatures } from "src/libraries/DevFeatures.sol";
 
 // Interfaces
 import { IOPContractsManager } from "interfaces/L1/IOPContractsManager.sol";
@@ -40,11 +41,20 @@ contract VerifyOPCM is Script {
     /// @notice Thrown when an artifact file is empty.
     error VerifyOPCM_EmptyArtifactFile(string _artifactPath);
 
+    /// @notice Thrown when contractsContainer addresses are not the same across all OPCM components.
+    error VerifyOPCM_ContractsContainerMismatch();
+
     /// @notice Thrown when the creation bytecode is not found in an artifact file.
     error VerifyOPCM_CreationBytecodeNotFound(string _artifactPath);
 
     /// @notice Thrown when the runtime bytecode is not found in an artifact file.
     error VerifyOPCM_RuntimeBytecodeNotFound(string _artifactPath);
+
+    /// @notice Thrown when there are getter functions in the ABI that are not being checked.
+    error VerifyOPCM_UnaccountedGetters(string[] _unaccountedGetters);
+
+    /// @notice Thrown when the dev feature bitmap is not empty on mainnet.
+    error VerifyOPCM_DevFeatureBitmapNotEmpty();
 
     /// @notice Preamble used for blueprint contracts.
     bytes constant BLUEPRINT_PREAMBLE = hex"FE7100";
@@ -87,6 +97,13 @@ contract VerifyOPCM is Script {
     /// @notice Maps contract names to an overriding source file name.
     mapping(string => string) internal sourceNameOverrides;
 
+    /// @notice Maps expected getter function names to their verification method.
+    /// Value can be either:
+    /// - An environment variable name (e.g., "EXPECTED_SUPERCHAIN_CONFIG") for getters verified via env vars
+    /// - "SKIP" for getters verified elsewhere in the verification process
+    /// WARNING: Do NOT add new getters without understanding their verification method!
+    mapping(string => string) internal expectedGetters;
+
     /// @notice Setup flag.
     bool internal ready;
 
@@ -94,8 +111,11 @@ contract VerifyOPCM is Script {
     function setUp() public {
         // Overrides for situations where field names do not cleanly map to contract names.
         fieldNameOverrides["optimismPortalImpl"] = "OptimismPortal2";
+        fieldNameOverrides["optimismPortalInteropImpl"] = "OptimismPortalInterop";
         fieldNameOverrides["mipsImpl"] = "MIPS64";
         fieldNameOverrides["ethLockboxImpl"] = "ETHLockbox";
+        fieldNameOverrides["faultDisputeGameV2Impl"] = "FaultDisputeGameV2";
+        fieldNameOverrides["permissionedDisputeGameV2Impl"] = "PermissionedDisputeGameV2";
         fieldNameOverrides["permissionlessDisputeGame1"] = "FaultDisputeGame";
         fieldNameOverrides["permissionlessDisputeGame2"] = "FaultDisputeGame";
         fieldNameOverrides["permissionedDisputeGame1"] = "PermissionedDisputeGame";
@@ -109,12 +129,37 @@ contract VerifyOPCM is Script {
         fieldNameOverrides["opcmUpgrader"] = "OPContractsManagerUpgrader";
         fieldNameOverrides["opcmInteropMigrator"] = "OPContractsManagerInteropMigrator";
         fieldNameOverrides["opcmStandardValidator"] = "OPContractsManagerStandardValidator";
+        fieldNameOverrides["contractsContainer"] = "OPContractsManagerContractsContainer";
 
         // Overrides for situations where contracts have differently named source files.
         sourceNameOverrides["OPContractsManagerGameTypeAdder"] = "OPContractsManager";
         sourceNameOverrides["OPContractsManagerDeployer"] = "OPContractsManager";
         sourceNameOverrides["OPContractsManagerUpgrader"] = "OPContractsManager";
         sourceNameOverrides["OPContractsManagerInteropMigrator"] = "OPContractsManager";
+        sourceNameOverrides["OPContractsManagerContractsContainer"] = "OPContractsManager";
+
+        // Expected getter functions and their verification methods.
+        // CRITICAL: Any getter in the ABI that's not in this list will cause verification to fail.
+        // NEVER add a getter without understanding HOW it's being verified!
+
+        // Getters verified via bytecode comparison (blueprints/implementations contain addresses)
+        expectedGetters["blueprints"] = "SKIP"; // Verified via bytecode comparison of blueprint contracts
+        expectedGetters["implementations"] = "SKIP"; // Verified via bytecode comparison of implementation contracts
+
+        // Getters verified via environment variables in _verifyOpcmImmutableVariables()
+        expectedGetters["protocolVersions"] = "EXPECTED_PROTOCOL_VERSIONS";
+        expectedGetters["superchainConfig"] = "EXPECTED_SUPERCHAIN_CONFIG";
+
+        // Getters for OPCM sub-contracts (addresses verified via bytecode comparison)
+        expectedGetters["opcmDeployer"] = "SKIP"; // Address verified via bytecode comparison
+        expectedGetters["opcmGameTypeAdder"] = "SKIP"; // Address verified via bytecode comparison
+        expectedGetters["opcmInteropMigrator"] = "SKIP"; // Address verified via bytecode comparison
+        expectedGetters["opcmStandardValidator"] = "SKIP"; // Address verified via bytecode comparison
+        expectedGetters["opcmUpgrader"] = "SKIP"; // Address verified via bytecode comparison
+
+        // Getters that don't need any sort of verification
+        expectedGetters["devFeatureBitmap"] = "SKIP";
+        expectedGetters["isDevFeatureEnabled"] = "SKIP";
 
         // Mark as ready.
         ready = true;
@@ -134,8 +179,14 @@ contract VerifyOPCM is Script {
     /// @param _addr Address of the contract to verify.
     /// @param _skipConstructorVerification Whether to skip constructor verification.
     function runSingle(string memory _name, address _addr, bool _skipConstructorVerification) public {
+        // This function is used as part of the release checklist to verify new contracts.
+        // Rather than requiring an opcm input parameter, just pass in an empty reference
+        // as we really only need this for features that are in development.
+        IOPContractsManager emptyOpcm = IOPContractsManager(address(0));
         _verifyOpcmContractRef(
-            OpcmContractRef({ field: _name, name: _name, addr: _addr, blueprint: false }), _skipConstructorVerification
+            emptyOpcm,
+            OpcmContractRef({ field: _name, name: _name, addr: _addr, blueprint: false }),
+            _skipConstructorVerification
         );
     }
 
@@ -158,13 +209,19 @@ contract VerifyOPCM is Script {
         // Fetch Implementations & Blueprints from OPCM
         IOPContractsManager opcm = IOPContractsManager(_opcmAddress);
 
+        // Validate that all ABI getters are accounted for.
+        _validateAllGettersAccounted();
+
+        // Validate that the dev feature bitmap is empty on mainnet.
+        _validateDevFeatureBitmap(opcm);
+
         // Collect all the references.
         OpcmContractRef[] memory refs = _collectOpcmContractRefs(opcm);
 
         // Verify each reference.
         bool success = true;
         for (uint256 i = 0; i < refs.length; i++) {
-            success = _verifyOpcmContractRef(refs[i], _skipConstructorVerification) && success;
+            success = _verifyOpcmContractRef(opcm, refs[i], _skipConstructorVerification) && success;
         }
 
         // Final Result
@@ -187,6 +244,19 @@ contract VerifyOPCM is Script {
             revert VerifyOPCM_NoProperties();
         }
 
+        // Verify that all component contracts have the same contractsContainer address.
+        _verifyContractsContainerConsistency(propRefs);
+
+        // Get the ContractsContainer address from the first component (they're all the same)
+        address contractsContainerAddr = address(0);
+        for (uint256 i = 0; i < propRefs.length; i++) {
+            string memory field = propRefs[i].field;
+            if (_hasContractsContainer(field)) {
+                contractsContainerAddr = _getContractsContainerAddress(propRefs[i].addr);
+                break;
+            }
+        }
+
         // Collect implementation references.
         OpcmContractRef[] memory implRefs = _getOpcmContractRefs(_opcm, "implementations", false);
         if (implRefs.length == 0) {
@@ -200,12 +270,18 @@ contract VerifyOPCM is Script {
         }
 
         // Create a single array to join everything together.
-        uint256 extraRefs = 1;
+        uint256 extraRefs = 2; // OPCM + ContractsContainer
         OpcmContractRef[] memory refs =
             new OpcmContractRef[](propRefs.length + implRefs.length + bpRefs.length + extraRefs);
 
         // References for OPCM and linked contracts.
         refs[0] = OpcmContractRef({ field: "opcm", name: "OPContractsManager", addr: address(_opcm), blueprint: false });
+        refs[1] = OpcmContractRef({
+            field: "contractsContainer",
+            name: "OPContractsManagerContractsContainer",
+            addr: contractsContainerAddr,
+            blueprint: false
+        });
 
         // Add the property references.
         for (uint256 i = 0; i < propRefs.length; i++) {
@@ -226,17 +302,107 @@ contract VerifyOPCM is Script {
         return refs;
     }
 
+    /// @notice Verifies that all OPCM component contracts have the same contractsContainer address.
+    /// @param _propRefs Array of property references containing component addresses.
+    function _verifyContractsContainerConsistency(OpcmContractRef[] memory _propRefs) internal view {
+        // Process components that have contractsContainer(), validate addresses, and verify consistency
+        OpcmContractRef[] memory components = new OpcmContractRef[](_propRefs.length);
+        address[] memory containerAddresses = new address[](_propRefs.length);
+        uint256 componentCount = 0;
+        address expectedContainer = address(0);
+
+        for (uint256 i = 0; i < _propRefs.length; i++) {
+            OpcmContractRef memory propRef = _propRefs[i];
+
+            if (!_hasContractsContainer(propRef.field)) {
+                continue;
+            }
+
+            components[componentCount] = propRef;
+            address containerAddr = _getContractsContainerAddress(propRef.addr);
+
+            if (containerAddr == address(0)) {
+                console.log(string.concat("ERROR: Failed to retrieve contractsContainer address from ", propRef.field));
+                revert VerifyOPCM_ContractsContainerMismatch();
+            }
+
+            containerAddresses[componentCount] = containerAddr;
+
+            if (componentCount == 0) {
+                expectedContainer = containerAddr;
+            } else if (containerAddr != expectedContainer) {
+                _logContainerAddressMismatch(components, containerAddresses, componentCount);
+                revert VerifyOPCM_ContractsContainerMismatch();
+            }
+
+            componentCount++;
+        }
+
+        // Ensure we found at least one component
+        if (componentCount == 0) {
+            console.log("ERROR: No OPCM components found for contractsContainer verification");
+            revert VerifyOPCM_ContractsContainerMismatch();
+        }
+
+        console.log(
+            string.concat(
+                "OK: All ", vm.toString(componentCount), " components have the same contractsContainer address"
+            )
+        );
+        console.log(string.concat("  contractsContainer: ", vm.toString(expectedContainer)));
+    }
+
+    /// @notice Logs container address mismatch details for debugging.
+    /// @param _components Array of components found so far.
+    /// @param _containerAddresses Array of container addresses for each component.
+    /// @param _componentCount Number of components processed.
+    function _logContainerAddressMismatch(
+        OpcmContractRef[] memory _components,
+        address[] memory _containerAddresses,
+        uint256 _componentCount
+    )
+        internal
+        pure
+    {
+        console.log("ERROR: contractsContainer addresses are not consistent across all components");
+        for (uint256 j = 0; j <= _componentCount; j++) {
+            console.log(string.concat("  ", _components[j].field, ": ", vm.toString(_containerAddresses[j])));
+        }
+    }
+
+    /// @notice Gets the contractsContainer address from a contract.
+    /// @param _contract The contract address to query.
+    /// @return The contractsContainer address.
+    function _getContractsContainerAddress(address _contract) internal view returns (address) {
+        // Call the contractsContainer() function on the contract.
+        // nosemgrep: sol-style-use-abi-encodecall
+        (bool success, bytes memory returnData) = _contract.staticcall(abi.encodeWithSignature("contractsContainer()"));
+        if (!success) {
+            console.log(
+                string.concat(
+                    "[FAIL] ERROR: Failed to call contractsContainer() function on contract ", vm.toString(_contract)
+                )
+            );
+            return address(0);
+        }
+        return abi.decode(returnData, (address));
+    }
+
     /// @notice Verifies a single OPCM contract reference (implementation or bytecode).
+    /// @param _opcm The OPCM contract that contains the target contract reference.
     /// @param _target The target contract reference to verify.
     /// @param _skipConstructorVerification Whether to skip constructor verification.
     /// @return True if the contract reference is verified, false otherwise.
     function _verifyOpcmContractRef(
+        IOPContractsManager _opcm,
         OpcmContractRef memory _target,
         bool _skipConstructorVerification
     )
         internal
         returns (bool)
     {
+        bool success = true;
+
         console.log();
         console.log(string.concat("Checking Contract: ", _target.field));
         console.log(string.concat("  Type: ", _target.blueprint ? "Blueprint" : "Implementation"));
@@ -246,6 +412,43 @@ contract VerifyOPCM is Script {
         // Build the expected path to the artifact file.
         string memory artifactPath = _buildArtifactPath(_target.name);
         console.log(string.concat("  Expected Runtime Artifact: ", artifactPath));
+
+        // Check if this is a V1 dispute game that should be skipped
+        if (_isV1DisputeGameImplementation(_target.name) && _target.blueprint) {
+            if (_isV2DisputeGamesEnabled(_opcm)) {
+                console.log("[SKIP] Dispute game blueprint not deployed (dispute game v2 feature enabled)");
+                return true; // Consider this "verified" when feature is on
+            } else if (_target.addr == address(0)) {
+                console.log("[FAIL] Dispute game blueprint not deployed (dispute game v2 feature disabled)");
+                success = false;
+            }
+        }
+        // Check if this is a V2 dispute game that should be skipped
+        if (_isV2DisputeGameImplementation(_target.name)) {
+            if (!_isV2DisputeGamesEnabled(_opcm)) {
+                if (_target.addr == address(0)) {
+                    console.log("[SKIP] V2 dispute game not deployed (feature disabled)");
+                    return true; // Consider this "verified" when feature is off
+                } else {
+                    console.log("[FAIL] ERROR: V2 dispute game deployed but feature disabled");
+                    success = false;
+                }
+            }
+            // If feature is enabled, continue with normal verification
+        }
+        // Check if this is a Super dispute game that should be skipped
+        if (_isSuperDisputeGameImplementation(_target.name)) {
+            if (!_isSuperDisputeGamesEnabled(_opcm)) {
+                if (_target.addr == address(0)) {
+                    console.log("[SKIP] Super game not deployed (feature disabled)");
+                    return true; // Consider this "verified" when feature is off
+                } else {
+                    console.log("[FAIL] ERROR: Super game deployed but feature disabled");
+                    success = false;
+                }
+            }
+            // If feature is enabled, continue with normal verification
+        }
 
         // Load artifact information (bytecode, immutable refs) for detailed comparison
         ArtifactInfo memory artifact = _loadArtifactInfo(artifactPath);
@@ -288,7 +491,7 @@ contract VerifyOPCM is Script {
         }
 
         // Perform detailed bytecode comparison.
-        bool success = _compareBytecode(actualCode, expectedCode, _target.name, artifact, !_target.blueprint);
+        success = _compareBytecode(actualCode, expectedCode, _target.name, artifact, !_target.blueprint) && success;
 
         // If requested and this is not a blueprint, we also need to check the creation code.
         if (!_target.blueprint && !_skipConstructorVerification) {
@@ -328,11 +531,118 @@ contract VerifyOPCM is Script {
             }
         }
 
+        // If this is the OPCM contract itself, verify the immutable variables as well.
+        if (keccak256(bytes(_target.field)) == keccak256(bytes("opcm"))) {
+            success = _verifyOpcmImmutableVariables(IOPContractsManager(_target.addr)) && success;
+        }
+
         // Log final status for this field.
         if (success) {
             console.log(string.concat("Status: [OK] Verified ", _target.name));
         } else {
             console.log(string.concat("Status: [FAIL] Verification failed for ", _target.name));
+        }
+
+        return success;
+    }
+
+    /// @notice Checks if V2 dispute games feature is enabled in the dev feature bitmap.
+    /// @param _opcm The OPContractsManager to check.
+    /// @return True if V2 dispute games are enabled.
+    function _isV2DisputeGamesEnabled(IOPContractsManager _opcm) internal view returns (bool) {
+        bytes32 bitmap = _opcm.devFeatureBitmap();
+        return DevFeatures.isDevFeatureEnabled(bitmap, DevFeatures.DEPLOY_V2_DISPUTE_GAMES);
+    }
+
+    /// @notice Checks if super dispute games feature is enabled in the dev feature bitmap.
+    /// @param _opcm The OPContractsManager to check.
+    /// @return True if super dispute games are enabled.
+    function _isSuperDisputeGamesEnabled(IOPContractsManager _opcm) internal view returns (bool) {
+        bytes32 bitmap = _opcm.devFeatureBitmap();
+        return DevFeatures.isDevFeatureEnabled(bitmap, DevFeatures.OPTIMISM_PORTAL_INTEROP);
+    }
+
+    /// @notice Checks if a contract is a V1 dispute game implementation.
+    /// @param _contractName The name to check.
+    /// @return True if this is a V1 dispute game.
+    function _isV1DisputeGameImplementation(string memory _contractName) internal pure returns (bool) {
+        return LibString.eq(_contractName, "FaultDisputeGame") || LibString.eq(_contractName, "PermissionedDisputeGame");
+    }
+
+    /// @notice Checks if a contract is a V2 dispute game implementation.
+    /// @param _contractName The name to check.
+    /// @return True if this is a V2 dispute game.
+    function _isV2DisputeGameImplementation(string memory _contractName) internal pure returns (bool) {
+        return LibString.eq(_contractName, "FaultDisputeGameV2")
+            || LibString.eq(_contractName, "PermissionedDisputeGameV2");
+    }
+
+    /// @notice Checks if a contract is a Super dispute game implementation.
+    /// @param _contractName The name to check.
+    /// @return True if this is a V2 dispute game.
+    function _isSuperDisputeGameImplementation(string memory _contractName) internal pure returns (bool) {
+        return LibString.eq(_contractName, "SuperFaultDisputeGame")
+            || LibString.eq(_contractName, "SuperPermissionedDisputeGame");
+    }
+
+    /// @notice Verifies that the immutable variables in the OPCM contract match expected values.
+    /// @param _opcm The OPCM contract to verify immutable variables for.
+    /// @return True if all immutable variables are verified, false otherwise.
+    function _verifyOpcmImmutableVariables(IOPContractsManager _opcm) internal returns (bool) {
+        console.log("  Verifying OPCM immutable variables...");
+
+        bool success = true;
+
+        // Get all OPCM getters and iterate over them
+        // Note: We use the pattern `success = false; continue;` for failures to ensure
+        // comprehensive reporting. Once success is false, it should never be reset to true.
+        // This allows us to collect and report ALL issues in a single verification run.
+        string[] memory allGetters = _getOpcmGetters();
+
+        for (uint256 i = 0; i < allGetters.length; i++) {
+            string memory functionName = allGetters[i];
+            string memory verificationMethod = expectedGetters[functionName];
+
+            // All getters must be accounted for in expectedGetters mapping
+            if (bytes(verificationMethod).length == 0) {
+                console.log("ERROR: Getter '%s' is not accounted for in expectedGetters mapping", functionName);
+                success = false;
+                continue;
+            }
+
+            // Skip getters that don't need env var verification
+            if (keccak256(bytes(verificationMethod)) == keccak256(bytes("SKIP"))) {
+                continue;
+            }
+
+            // Get expected address from environment variable
+            // nosemgrep: sol-style-vm-env-only-in-config-sol
+            address expectedAddress = vm.envAddress(verificationMethod);
+
+            // Call the function to retrieve the actual address
+            // nosemgrep: sol-style-use-abi-encodecall
+            (bool callSuccess, bytes memory returnedData) =
+                address(_opcm).staticcall(abi.encodeWithSignature(string.concat(functionName, "()")));
+
+            if (!callSuccess) {
+                console.log(string.concat("    [FAIL] ERROR: Failed to call ", functionName, "() function on OPCM."));
+                success = false;
+                continue;
+            }
+
+            // Decode as an address
+            address actualAddress = abi.decode(returnedData, (address));
+
+            // Log the comparison
+            console.log(string.concat("    ", functionName, ": ", vm.toString(actualAddress)));
+            console.log(string.concat("    expected: ", vm.toString(expectedAddress)));
+
+            if (actualAddress != expectedAddress) {
+                console.log(string.concat("    [FAIL] ERROR: ", functionName, " mismatch"));
+                success = false;
+            } else {
+                console.log(string.concat("    [OK] ", functionName, " verified"));
+            }
         }
 
         return success;
@@ -656,5 +966,91 @@ contract VerifyOPCM is Script {
 
         // Return computed path, relative to the contracts-bedrock directory.
         return string.concat("forge-artifacts/", sourceName, ".sol/", _contractName, ".json");
+    }
+
+    /// @notice Checks if a field name represents an OPCM component contract that has contractsContainer().
+    /// @param _field The field name to check.
+    /// @return True if the field represents an OPCM component with contractsContainer(), false otherwise.
+    function _hasContractsContainer(string memory _field) internal pure returns (bool) {
+        // Check if it starts with "opcm"
+        if (!LibString.startsWith(_field, "opcm")) {
+            return false;
+        }
+
+        // Components that start with "opcm" but don't extend OPContractsManagerBase (and thus don't have
+        // contractsContainer())
+        string[] memory exclusions = new string[](1);
+        exclusions[0] = "opcmStandardValidator";
+
+        // Check if the field is in the exclusion list
+        for (uint256 i = 0; i < exclusions.length; i++) {
+            if (LibString.eq(_field, exclusions[i])) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// @notice Gets all OPCM getter function names from the ABI.
+    /// @return Array of getter function names found in the OPContractsManager ABI.
+    function _getOpcmGetters() internal returns (string[] memory) {
+        return abi.decode(
+            vm.parseJson(
+                Process.bash(
+                    string.concat(
+                        "jq -r '[.abi[] | select(.type == \"function\" and .stateMutability == \"view\" and (.inputs | length) == 0) | .name]' ",
+                        _buildArtifactPath("OPContractsManager")
+                    )
+                )
+            ),
+            (string[])
+        );
+    }
+
+    /// @notice Validates that the dev feature bitmap is empty on mainnet.
+    /// @param _opcm The OPCM contract.
+    function _validateDevFeatureBitmap(IOPContractsManager _opcm) internal view {
+        // Get the dev feature bitmap.
+        bytes32 devFeatureBitmap = _opcm.devFeatureBitmap();
+
+        // Check if we're in a testing environment.
+        bool isTestingEnvironment = address(0xbeefcafe).code.length > 0;
+
+        // Check if any dev features are enabled.
+        if (block.chainid == 1 && !isTestingEnvironment && devFeatureBitmap != bytes32(0)) {
+            revert VerifyOPCM_DevFeatureBitmapNotEmpty();
+        }
+    }
+
+    /// @notice Validates that all getter functions in the OPContractsManager ABI are accounted for
+    ///         in the expectedGetters mapping. This ensures we don't miss any new getters that
+    ///         might be added to the contract.
+    function _validateAllGettersAccounted() internal {
+        // Get all function names from the OPContractsManager ABI
+        string[] memory allFunctions = _getOpcmGetters();
+
+        // Check for any functions that are not in our expectedGetters mapping
+        string[] memory unaccountedGetters = new string[](allFunctions.length);
+        uint256 unaccountedCount = 0;
+
+        for (uint256 i = 0; i < allFunctions.length; i++) {
+            string memory functionName = allFunctions[i];
+            // Check if the getter is not in our mapping (empty string means not set)
+            if (bytes(expectedGetters[functionName]).length == 0) {
+                unaccountedGetters[unaccountedCount] = functionName;
+                unaccountedCount++;
+            }
+        }
+
+        // If there are unaccounted getters, revert with the list
+        if (unaccountedCount > 0) {
+            // Create a trimmed array with only the unaccounted getters
+            string[] memory trimmedUnaccounted = new string[](unaccountedCount);
+            for (uint256 i = 0; i < unaccountedCount; i++) {
+                trimmedUnaccounted[i] = unaccountedGetters[i];
+            }
+            revert VerifyOPCM_UnaccountedGetters(trimmedUnaccounted);
+        }
     }
 }

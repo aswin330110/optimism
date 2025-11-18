@@ -36,8 +36,8 @@ Applies to Solidity files.
 - Contracts should be built assuming upgradeability by default
 - Extend OpenZeppelin's `Initializable` or base contract
 - Use the `ReinitializableBase` contract
-- Include an `initialize` function with the `reinitializer(initValue())` modifier
-- If including an `upgrade` function, use the `reinitializer(initValue())` modifier
+- Include an `initialize` function with the `reinitializer(initVersion())` modifier
+- If including an `upgrade` function, use the `reinitializer(initVersion())` modifier
 - In the constructor:
   - Call `_disableInitializers()`
   - Set any immutables (though generally avoid immutables)
@@ -49,6 +49,8 @@ Applies to Solidity files.
   - `patch`: changes that don't modify bytecode (comments)
   - `minor`: changes that modify bytecode OR expand ABI without breaking existing interface
   - `major`: changes that break existing interface OR modify security model
+
+AI code review tools should NOT comment on the choice of version increment.
 
 ## Dependencies
 - Prefer OpenZeppelin's Upgradeable contracts for basic functionality
@@ -63,7 +65,7 @@ Applies to Solidity files.
   - `method`: `test`, `testFuzz`, or `testDiff`
   - `status`: `succeeds`, `reverts`, `works`, `fails`, or `benchmark`
 - Test contract naming:
-  - `TargetContract_Init`: for basic setup contracts
+  - `TargetContract_TestInit`: for basic setup contracts
   - `TargetContract_FunctionName_Test`: for happy path tests
   - `TargetContract_FunctionName_TestFail`: for sad path tests
   - `TargetContract_Harness`: for harness contracts

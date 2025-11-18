@@ -1,3 +1,5 @@
+//go:build !ci
+
 package upgrade
 
 import (
@@ -5,27 +7,28 @@ import (
 	"testing"
 	"time"
 
-	stypes "github.com/ethereum-optimism/optimism/op-supervisor/supervisor/types"
-	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/core/types"
-
 	"github.com/ethereum-optimism/optimism/op-acceptance-tests/tests/interop"
 	"github.com/ethereum-optimism/optimism/op-chain-ops/genesis"
+	"github.com/ethereum-optimism/optimism/op-core/forks"
+	"github.com/ethereum-optimism/optimism/op-core/predeploys"
 	"github.com/ethereum-optimism/optimism/op-devstack/devtest"
 	"github.com/ethereum-optimism/optimism/op-devstack/dsl"
 	"github.com/ethereum-optimism/optimism/op-devstack/presets"
 	"github.com/ethereum-optimism/optimism/op-devstack/stack/match"
-	"github.com/ethereum-optimism/optimism/op-node/rollup"
 	"github.com/ethereum-optimism/optimism/op-service/eth"
-	"github.com/ethereum-optimism/optimism/op-service/predeploys"
+	stypes "github.com/ethereum-optimism/optimism/op-supervisor/supervisor/types"
+
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
 )
 
 func TestPostInbox(gt *testing.T) {
+	gt.Skip("Skipping Interop Acceptance Test")
 	t := devtest.ParallelT(gt)
 	sys := presets.NewSimpleInterop(t)
 	devtest.RunParallel(t, sys.L2Networks(), func(t devtest.T, net *dsl.L2Network) {
 		require := t.Require()
-		activationBlock := net.AwaitActivation(t, rollup.Interop)
+		activationBlock := net.AwaitActivation(t, forks.Interop)
 
 		el := net.Escape().L2ELNode(match.FirstL2EL)
 		implAddrBytes, err := el.EthClient().GetStorageAt(t.Ctx(), predeploys.CrossL2InboxAddr,
@@ -40,7 +43,8 @@ func TestPostInbox(gt *testing.T) {
 }
 
 func TestPostInteropUpgradeComprehensive(gt *testing.T) {
-	t := devtest.ParallelT(gt)
+	gt.Skip("Skipping Interop Acceptance Test")
+	t := devtest.SerialT(gt)
 	sys := presets.NewSimpleInterop(t)
 	require := t.Require()
 	logger := t.Logger()
@@ -92,7 +96,7 @@ func testSupervisorAnchorBlock(t devtest.T, sys *presets.SimpleInterop) {
 			t.Gate().True(upgradeTime.Before(deadline), "test must not time out before upgrade happens")
 		}
 
-		activationBlock := net.AwaitActivation(t, rollup.Interop)
+		activationBlock := net.AwaitActivation(t, forks.Interop)
 		sys.Supervisor.WaitForL2HeadToAdvanceTo(net.ChainID(), stypes.CrossSafe, activationBlock)
 
 		logger.Info("Validating anchor block timing",

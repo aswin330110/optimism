@@ -29,6 +29,7 @@ contract DeployConfig is Script {
     uint256 public l2GenesisFjordTimeOffset;
     uint256 public l2GenesisGraniteTimeOffset;
     uint256 public l2GenesisHoloceneTimeOffset;
+    uint256 public l2GenesisJovianTimeOffset;
     address public p2pSequencerAddress;
     address public batchInboxAddress;
     address public batchSenderAddress;
@@ -47,6 +48,9 @@ contract DeployConfig is Script {
     address public sequencerFeeVaultRecipient;
     uint256 public sequencerFeeVaultMinimumWithdrawalAmount;
     uint256 public sequencerFeeVaultWithdrawalNetwork;
+    address public operatorFeeVaultRecipient;
+    uint256 public operatorFeeVaultMinimumWithdrawalAmount;
+    uint256 public operatorFeeVaultWithdrawalNetwork;
     address public governanceTokenOwner;
     uint256 public l2GenesisBlockGasLimit;
     uint32 public basefeeScalar;
@@ -75,8 +79,21 @@ contract DeployConfig is Script {
     uint256 public daBondSize;
     uint256 public daResolverRefundPercentage;
 
+    // V2 Dispute Game Configuration
+    uint256 public faultGameV2MaxGameDepth;
+    uint256 public faultGameV2SplitDepth;
+    uint256 public faultGameV2ClockExtension;
+    uint256 public faultGameV2MaxClockDuration;
+
     bool public useInterop;
     bool public useUpgradedFork;
+    bytes32 public devFeatureBitmap;
+
+    bool public useRevenueShare;
+    address public chainFeesRecipient;
+    /// @notice This is not read from JSON because it is hardcoded in the deployer. It is overwritten with its setter
+    ///         for testing.
+    address public l1FeesDepositor;
 
     function read(string memory _path) public {
         console.log("DeployConfig: reading file %s", _path);
@@ -96,6 +113,7 @@ contract DeployConfig is Script {
         l2GenesisFjordTimeOffset = _readOr(_json, "$.l2GenesisFjordTimeOffset", NULL_OFFSET);
         l2GenesisGraniteTimeOffset = _readOr(_json, "$.l2GenesisGraniteTimeOffset", NULL_OFFSET);
         l2GenesisHoloceneTimeOffset = _readOr(_json, "$.l2GenesisHoloceneTimeOffset", NULL_OFFSET);
+        l2GenesisJovianTimeOffset = _readOr(_json, "$.l2GenesisJovianTimeOffset", NULL_OFFSET);
 
         p2pSequencerAddress = stdJson.readAddress(_json, "$.p2pSequencerAddress");
         batchInboxAddress = stdJson.readAddress(_json, "$.batchInboxAddress");
@@ -115,6 +133,9 @@ contract DeployConfig is Script {
         sequencerFeeVaultRecipient = stdJson.readAddress(_json, "$.sequencerFeeVaultRecipient");
         sequencerFeeVaultMinimumWithdrawalAmount = stdJson.readUint(_json, "$.sequencerFeeVaultMinimumWithdrawalAmount");
         sequencerFeeVaultWithdrawalNetwork = stdJson.readUint(_json, "$.sequencerFeeVaultWithdrawalNetwork");
+        operatorFeeVaultRecipient = stdJson.readAddress(_json, "$.operatorFeeVaultRecipient");
+        operatorFeeVaultMinimumWithdrawalAmount = stdJson.readUint(_json, "$.operatorFeeVaultMinimumWithdrawalAmount");
+        operatorFeeVaultWithdrawalNetwork = stdJson.readUint(_json, "$.operatorFeeVaultWithdrawalNetwork");
         governanceTokenOwner = stdJson.readAddress(_json, "$.governanceTokenOwner");
         l2GenesisBlockGasLimit = stdJson.readUint(_json, "$.l2GenesisBlockGasLimit");
         basefeeScalar = uint32(_readOr(_json, "$.gasPriceOracleBaseFeeScalar", 1368));
@@ -149,7 +170,14 @@ contract DeployConfig is Script {
         daResolverRefundPercentage = _readOr(_json, "$.daResolverRefundPercentage", 0);
 
         useInterop = _readOr(_json, "$.useInterop", false);
+        devFeatureBitmap = bytes32(_readOr(_json, "$.devFeatureBitmap", 0));
         useUpgradedFork;
+        useRevenueShare = _readOr(_json, "$.useRevenueShare", false);
+        chainFeesRecipient = _readOr(_json, "$.chainFeesRecipient", address(0));
+        faultGameV2MaxGameDepth = _readOr(_json, "$.faultGameV2MaxGameDepth", 73);
+        faultGameV2SplitDepth = _readOr(_json, "$.faultGameV2SplitDepth", 30);
+        faultGameV2ClockExtension = _readOr(_json, "$.faultGameV2ClockExtension", 10800);
+        faultGameV2MaxClockDuration = _readOr(_json, "$.faultGameV2MaxClockDuration", 302400);
     }
 
     function fork() public view returns (Fork fork_) {
@@ -201,9 +229,29 @@ contract DeployConfig is Script {
         useInterop = _useInterop;
     }
 
+    /// @notice Allow the `useRevenueShare` config to be overridden in testing environments
+    function setUseRevenueShare(bool _useRevenueShare) public {
+        useRevenueShare = _useRevenueShare;
+    }
+
+    /// @notice Allow the `l1FeesDepositor` config to be overridden in testing environments
+    function setL1FeesDepositor(address _l1FeesDepositor) public {
+        l1FeesDepositor = _l1FeesDepositor;
+    }
+
+    /// @notice Allow the `chainFeesRecipient` config to be overridden in testing environments
+    function setChainFeesRecipient(address _chainFeesRecipient) public {
+        chainFeesRecipient = _chainFeesRecipient;
+    }
+
     /// @notice Allow the `fundDevAccounts` config to be overridden.
     function setFundDevAccounts(bool _fundDevAccounts) public {
         fundDevAccounts = _fundDevAccounts;
+    }
+
+    /// @notice Allow the `devFeatureBitmap` config to be overridden in testing environments
+    function setDevFeatureBitmap(bytes32 _devFeatureBitmap) public {
+        devFeatureBitmap = _devFeatureBitmap;
     }
 
     /// @notice Allow the `useUpgradedFork` config to be overridden in testing environments
@@ -218,7 +266,9 @@ contract DeployConfig is Script {
     }
 
     function latestGenesisFork() internal view returns (Fork) {
-        if (l2GenesisHoloceneTimeOffset == 0) {
+        if (l2GenesisJovianTimeOffset == 0) {
+            return Fork.JOVIAN;
+        } else if (l2GenesisHoloceneTimeOffset == 0) {
             return Fork.HOLOCENE;
         } else if (l2GenesisGraniteTimeOffset == 0) {
             return Fork.GRANITE;

@@ -16,7 +16,7 @@ import { IProxyAdminOwnedBase } from "interfaces/L1/IProxyAdminOwnedBase.sol";
 
 /// @title AnchorStateRegistry_TestInit
 /// @notice Reusable test initialization for `AnchorStateRegistry` tests.
-contract AnchorStateRegistry_TestInit is BaseFaultDisputeGame_TestInit {
+abstract contract AnchorStateRegistry_TestInit is BaseFaultDisputeGame_TestInit {
     /// @dev A valid l2BlockNumber that comes after the current anchor root block.
     uint256 validL2BlockNumber;
 
@@ -79,6 +79,68 @@ contract AnchorStateRegistry_Initialize_Test is AnchorStateRegistry_TestInit {
 
         // Assert that the initializer value matches the expected value.
         assertEq(val, anchorStateRegistry.initVersion());
+    }
+
+    /// @notice Tests that the retirement timestamp is set on the first initialization.
+    function test_initialize_setsRetirementTimestamp_succeeds() public {
+        skipIfForkTest("State has changed since initialization on a forked network.");
+
+        (Hash root, uint256 l2SequenceNumber) = anchorStateRegistry.getAnchorRoot();
+        GameType startingGameType = anchorStateRegistry.respectedGameType();
+
+        StorageSlot memory initSlot = ForgeArtifacts.getSlot("AnchorStateRegistry", "_initialized");
+        StorageSlot memory retirementSlot = ForgeArtifacts.getSlot("AnchorStateRegistry", "retirementTimestamp");
+        address proxyAdminOwner = anchorStateRegistry.proxyAdminOwner();
+
+        // Reset initialization and retirement timestamp state.
+        vm.store(address(anchorStateRegistry), bytes32(initSlot.slot), bytes32(0));
+        vm.store(address(anchorStateRegistry), bytes32(retirementSlot.slot), bytes32(0));
+
+        uint256 newTimestamp = block.timestamp + 100;
+        vm.warp(newTimestamp);
+        uint64 expectedTimestamp = uint64(newTimestamp);
+
+        vm.prank(proxyAdminOwner);
+        anchorStateRegistry.initialize(
+            systemConfig,
+            disputeGameFactory,
+            Proposal({ root: root, l2SequenceNumber: l2SequenceNumber }),
+            startingGameType
+        );
+
+        assertEq(anchorStateRegistry.retirementTimestamp(), expectedTimestamp);
+    }
+
+    /// @notice Tests that the retirement timestamp is unchanged during re-initialization.
+    function test_initialize_reinitializationDoesNotChangeRetirementTimestamp_succeeds() public {
+        skipIfForkTest("State has changed since initialization on a forked network.");
+
+        (Hash root, uint256 l2SequenceNumber) = anchorStateRegistry.getAnchorRoot();
+        GameType startingGameType = anchorStateRegistry.respectedGameType();
+
+        StorageSlot memory initSlot = ForgeArtifacts.getSlot("AnchorStateRegistry", "_initialized");
+        address proxyAdminOwner = anchorStateRegistry.proxyAdminOwner();
+
+        uint256 initialTimestamp = block.timestamp + 200;
+        vm.warp(initialTimestamp);
+        vm.prank(superchainConfig.guardian());
+        anchorStateRegistry.updateRetirementTimestamp();
+        uint64 originalTimestamp = anchorStateRegistry.retirementTimestamp();
+
+        uint256 reinitTimestamp = block.timestamp + 200;
+        vm.warp(reinitTimestamp);
+
+        vm.store(address(anchorStateRegistry), bytes32(initSlot.slot), bytes32(0));
+
+        vm.prank(proxyAdminOwner);
+        anchorStateRegistry.initialize(
+            systemConfig,
+            disputeGameFactory,
+            Proposal({ root: root, l2SequenceNumber: l2SequenceNumber }),
+            startingGameType
+        );
+
+        assertEq(anchorStateRegistry.retirementTimestamp(), originalTimestamp);
     }
 
     /// @notice Tests that initialization cannot be done twice
